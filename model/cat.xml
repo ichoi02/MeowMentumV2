@@ -1,0 +1,65 @@
+<mujoco model="cat">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.001">
+    <flag contact="disable"/>
+  </option>
+
+  <asset>
+    <material name="grey" rgba="0.5 0.5 0.5 1"/>
+    <material name="color1" rgba="1 0.8 0.5 1"/>
+    <material name="color2" rgba="1 0.878 0.698 1"/>
+    <material name="color3" rgba="1 0.953 0.878 1"/>
+  </asset>
+
+  <worldbody>
+    <light directional="true" diffuse=".8 .8 .8" pos="0 0 10" dir="0 0 -1"/>
+
+    <geom name="floor" type="plane" size="0 0 0.05" material="grey"/>
+    <body name="front_body" pos="0 0 3" euler="0 0 0">
+      <freejoint name="root"/>
+      <!-- 663g body + 100g battery (TODO: measure battery mass) -->
+      <inertial pos="0 0 0" mass="0.763" diaginertia="0.0012717 0.0012717 0.0012717"/>
+      <geom type="box" size="0.05 0.05 0.05" material="color1"/>
+      <geom name="front_paw1" type="sphere" size="0.02" pos="-0.05 0.05 -0.05" mass="0" material="color1"/>
+      <geom name="front_paw2" type="sphere" size="0.02" pos="-0.05 -0.05 -0.05" mass="0" material="color1"/>
+      
+      <body name="spine_1" pos="0.1 0 0">
+        <joint name="rot1" type="hinge" axis="1 0 0" range="-7.28 7.28" damping="0.00197" frictionloss="0.005" armature="0.00015"/>
+        <!-- spine 147g total, split evenly across spine_1 / spine_2 -->
+        <inertial pos="0 0 0" mass="0.0735" diaginertia="0.0000190 0.0000331 0.0000190"/>
+        <geom type="cylinder" size="0.03 0.01" pos="0 -0.01 0" euler="1.5708 0 0" material="color1"/>
+
+        <body name="spine_2" pos="0.0 0 0">
+          <joint name="pitch" type="hinge" axis="0 1 0" range="-1.57 1.57" damping="0.034" frictionloss="0.033" armature="0.003" />
+          <inertial pos="0 0 0" mass="0.0735" diaginertia="0.0000190 0.0000331 0.0000190"/>
+          <geom type="cylinder" size="0.03 0.01" pos="0 0.01 0" euler="1.5708 0 0" material="color3"/>
+
+          <body name="rear_body" pos="0.1 0 0">
+            <joint name="rot2" type="hinge" axis="1 0 0" range="-7.28 7.28" damping="0.00197" frictionloss="0.005" armature="0.00015"/>
+            <inertial pos="0 0 0" mass="0.723" diaginertia="0.0012050 0.0012050 0.0012050"/>
+            <geom type="box" size="0.05 0.05 0.05" material="color3"/>
+            <geom name="rear_paw1" type="sphere" size="0.02" pos="0.05 0.05 -0.05" mass="0" material="color3"/>
+            <geom name="rear_paw2" type="sphere" size="0.02" pos="0.05 -0.05 -0.05" mass="0" material="color3"/>
+
+            <body name="tail" pos="0.05 0 0">
+              <joint name="tail" type="hinge" axis="0 1 0" range="-1.57 1.57" damping="0.034" frictionloss="0.033" armature="0.003"/>
+              <!-- 172g concentrated at the tail tip (pos 0.2) -->
+              <inertial pos="0.2 0 0" mass="0.172" diaginertia="1e-6 1e-6 1e-6"/>
+              <geom type="cylinder" size="0.005 0.1" pos="0.1 0 0" euler="0 1.5708 0" mass="0" material="color2"/>
+              <geom type="sphere" size="0.01" pos="0.2 0 0" mass="0" material="color2"/>
+            </body>
+            
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="motor1" joint="rot1" ctrllimited="true" ctrlrange="-0.17 0.17"/>
+    <motor name="motor2" joint="pitch" ctrllimited="true" ctrlrange="-1.1 1.1"/>
+    <motor name="motor3" joint="rot2" ctrllimited="true" ctrlrange="-0.17 0.17"/>
+    <motor name="motor4" joint="tail" ctrllimited="true" ctrlrange="-1.1 1.1"/>
+  </actuator>
+
+</mujoco>

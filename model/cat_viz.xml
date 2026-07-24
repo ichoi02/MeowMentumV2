@@ -1,0 +1,73 @@
+<mujoco model="cat">
+  <compiler angle="radian"/>
+  <option timestep="0.01">
+    <flag contact="disable"/>
+  </option>
+
+  <default>
+    <joint limited="true" armature="0.000112" damping="0.0013" frictionloss="0.0077"/>
+  </default>
+
+  <asset>
+    <material name="grey" rgba="0.5 0.5 0.5 1"/>
+    <material name="color1" rgba="1 0.8 0.5 1"/>
+    <material name="color2" rgba="1 0.878 0.698 1"/>
+    <material name="color3" rgba="1 0.953 0.878 1"/>
+  </asset>
+
+  <worldbody>
+    <light directional="true" diffuse=".8 .8 .8" pos="0 0 10" dir="0 0 -1"/>
+
+    <geom name="floor" type="plane" size="0 0 0.05" material="grey"/>
+
+    <body name="rear_ghost" mocap="true">
+        <geom type="box" size="0.06 0.06 0.06" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="front_body" pos="0 0 3" euler="0 0 0">
+      <freejoint name="root"/>
+      <inertial pos="0 0 0" mass="0.4" diaginertia="0.0006667 0.0006667 0.0006667"/>
+      <geom type="box" size="0.05 0.05 0.05" material="color1"/>
+      <geom name="front_paw1" type="sphere" size="0.02" pos="-0.05 0.05 -0.05" mass="0" material="color1"/>
+      <geom name="front_paw2" type="sphere" size="0.02" pos="-0.05 -0.05 -0.05" mass="0" material="color1"/>
+      
+      <body name="spine_1" pos="0.1 0 0">
+        <joint name="rot1" type="hinge" axis="1 0 0" range="-7.28 7.28"/>
+        <inertial pos="0 0 0" mass="0.2" diaginertia="0.00007167 0.00009 0.00007167"/>
+        <geom type="cylinder" size="0.03 0.01" pos="0 -0.01 0" euler="1.5708 0 0" material="color1"/>
+
+        <body name="spine_2" pos="0.0 0 0">
+          <joint name="pitch" type="hinge" axis="0 1 0" range="-1.57 1.57" 
+          armature="0.002634" 
+          damping="0.0562" 
+          frictionloss="0.0918" />
+          <inertial pos="0 0 0" mass="0.2" diaginertia="0.00007167 0.00009 0.00007167"/>
+          <geom type="cylinder" size="0.03 0.01" pos="0 0.01 0" euler="1.5708 0 0" material="color3"/>
+
+          <body name="rear_body" pos="0.1 0 0">
+            <joint name="rot2" type="hinge" axis="1 0 0" range="-7.28 7.28"/>
+            <inertial pos="0 0 0" mass="0.4" diaginertia="0.0006667 0.0006667 0.0006667"/>
+            <geom type="box" size="0.05 0.05 0.05" material="color3"/>
+            <geom name="rear_paw1" type="sphere" size="0.02" pos="0.05 0.05 -0.05" mass="0" material="color3"/>
+            <geom name="rear_paw2" type="sphere" size="0.02" pos="0.05 -0.05 -0.05" mass="0" material="color3"/>
+
+            <body name="tail" pos="0.05 0 0">
+              <joint name="tail" type="hinge" axis="0 1 0" range="-1.57 1.57"/>
+              <inertial pos="0.2 0 0" mass="0.2" diaginertia="1e-6 1e-6 1e-6"/>
+              <geom type="cylinder" size="0.01 0.1" pos="0.1 0 0" euler="0 1.5708 0" mass="0" material="color2"/>
+            </body>
+            
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="motor1" joint="rot1" ctrllimited="true" ctrlrange="-0.17 0.17"/>
+    <motor name="motor2" joint="pitch" ctrllimited="true" ctrlrange="-0.17 0.17"/>
+    <motor name="motor3" joint="rot2" ctrllimited="true" ctrlrange="-0.17 0.17"/>
+    <motor name="motor4" joint="tail" ctrllimited="true" ctrlrange="-0.17 0.17"/>
+  </actuator>
+
+</mujoco>
