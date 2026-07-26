@@ -12,8 +12,9 @@ import os
 w_pos = 1.0
 w_sm = 0.1
 w_en = 1.0
-w_av = 0.01  # angular velocity penalty weight
+w_av = 0.0  # angular velocity penalty weight (temporarily disabled)
 k = 0.2 # tanh gain param
+init_ang_vel_max = 0.0  # rad/s, per-axis range for random initial tumble
 # --------------------------
 
 class CatEnv(MujocoEnv, EzPickle):
@@ -22,7 +23,7 @@ class CatEnv(MujocoEnv, EzPickle):
     def __init__(self, render_mode=None):
         model_path = os.path.abspath("model/cat.xml")
         
-        observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(56,), dtype=np.float32)
+        observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(25,), dtype=np.float32)
         action_space = spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32)
 
         MujocoEnv.__init__(
@@ -66,7 +67,7 @@ class CatEnv(MujocoEnv, EzPickle):
         # response: fastest settling with no overshoot or Coulomb limit cycle, on
         # each joint's composite inertia / stall torque / damping / friction.
         # Order: [rot1, pitch, rot2, tail]. kp*(err) - kd*vel -> normalized [-1,1].
-        self.pd_nominal = [(5.0, 0.4), (20.0, 1.5), (5.0, 0.4), (30.0, 1.0)]
+        self.pd_nominal = [(2.0, 0.2), (20.0, 2.0), (2.0, 0.2), (20.0, 2.0)]
         self.pd = [util.PDController(kp, kd) for kp, kd in self.pd_nominal]
 
         self.ctrls = []
@@ -181,37 +182,33 @@ class CatEnv(MujocoEnv, EzPickle):
         qpos = self.init_qpos.copy()
         qvel = self.init_qvel.copy()
 
-        # randomize initial orientation
-        random_roll = np.random.uniform(-np.pi, np.pi)
-        # random_pitch = np.random.uniform(-np.pi, np.pi)
-        random_pitch = 0
-        random_yaw = np.random.uniform(-np.pi, np.pi)
-
-        # TODO: randomize initial angular velocity
-        random_roll_rate = 0#np.random.uniform(-6, 6)
-        random_pitch_rate = 0
-        random_yaw_rate = 0
-
-        # Set initial states
-        r = R.from_euler("xyz", [random_roll, random_pitch, random_yaw], degrees=False)
+        # Randomize initial orientation. Policy and reward are yaw-invariant, so we
+        # sample a uniformly random attitude (SO(3)): full roll/pitch coverage, with
+        # heading a free dimension. The robot may be dropped in any orientation.
+        r = R.random()
         quat_xyzw = r.as_quat()
         qpos[3:7] = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]
-        qvel[3:6] = [random_roll_rate, random_pitch_rate, random_yaw_rate]
+
+        # Randomize initial angular velocity: the robot is dropped already tumbling.
+        # Root free-joint angular velocity lives in qvel[3:6].
+        qvel[3:6] = np.random.uniform(-init_ang_vel_max, init_ang_vel_max, size=3)
 
         self.set_state(qpos, qvel)
         
         return self._get_obs()
 
     def _get_obs(self):
-        # Position
-        front_body_pos = self.data.xpos[self._body_idx["front_body"]]
-        rear_body_pos = self.data.xpos[self._body_idx["rear_body"]]
+        # The observation is strictly yaw-invariant: nothing below depends on the
+        # robot's heading about world-z. Absolute root position/orientation and
+        # world-frame root velocities are dropped (heading-dependent and useless
+        # for a contact-free mid-air righting task).
 
-        # Rotation matrix
-        front_body_rot = util.to_rotation_matrix(self.data.xquat[self._body_idx["front_body"]])
-        rear_body_rot = util.to_rotation_matrix(self.data.xquat[self._body_idx["rear_body"]])
+        # Projected gravity (yaw-invariant orientation cue): world -z in body frame.
+        # Captures exactly the non-yaw part of each body's orientation.
+        front_proj_grav = util.to_projected_gravity(self.data.xquat[self._body_idx["front_body"]])
+        rear_proj_grav = util.to_projected_gravity(self.data.xquat[self._body_idx["rear_body"]])
 
-        # Gyro
+        # Gyro (body-frame angular velocity, yaw-invariant)
         front_vel = np.zeros(6)
         mujoco.mj_objectVelocity(self.model, self.data, mujoco.mjtObj.mjOBJ_BODY, self._body_idx["front_body"], front_vel, 1)
         front_gyro = front_vel[:3]
@@ -219,19 +216,19 @@ class CatEnv(MujocoEnv, EzPickle):
         mujoco.mj_objectVelocity(self.model, self.data, mujoco.mjtObj.mjOBJ_BODY, self._body_idx["rear_body"], rear_vel, 1)
         rear_gyro = rear_vel[:3]
 
-        # Joint positions
-        qpos = self.data.qpos
-        qvel = self.data.qvel
+        # Joint state only (root free-joint qpos[:7]/qvel[:6] dropped): 4 joints in
+        # XML order [rot1, pitch, rot2, tail]. Joint-space -> yaw-invariant.
+        joint_qpos = self.data.qpos[7:]
+        joint_qvel = self.data.qvel[6:]
 
-        # Control signal
+        # Control signal (joint-space torques, yaw-invariant)
         ctrl = self.data.ctrl
         step = np.array([self.steps / self.max_steps])
 
         obs = np.concatenate([
-            front_body_rot, rear_body_rot,
+            front_proj_grav, rear_proj_grav,
             front_gyro, rear_gyro,
-            qpos, qvel,
-            front_body_pos, rear_body_pos,
+            joint_qpos, joint_qvel,
             ctrl, step
         ])
         return obs.astype(np.float32)

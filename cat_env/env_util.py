@@ -20,6 +20,16 @@ def add_gaussian_noise(values, magnitude):
 def to_rotation_matrix(quat):
     return R.from_quat(quat, scalar_first=True).as_matrix().flatten()
 
+def to_projected_gravity(quat):
+    """World gravity direction (-z) expressed in the body frame.
+
+    Yaw-invariant orientation cue: a rotation about world-z leaves world-z
+    unchanged, so this 3-vector does not depend on the robot's heading. Returns
+    a unit vector (g_body = R^T @ [0, 0, -1], where R is body-to-world).
+    """
+    r = R.from_quat(quat, scalar_first=True)
+    return r.apply([0.0, 0.0, -1.0], inverse=True)
+
 def add_rotational_noise(rot_matrices_flat, std_dev=0.01):
     rot_matrices = rot_matrices_flat.reshape(-1, 3, 3)
     noise_vecs = np.random.normal(scale=std_dev, size=(rot_matrices.shape[0], 3))
