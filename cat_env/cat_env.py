@@ -9,12 +9,13 @@ import mujoco
 import os
 
 # ---- train parameters ----
-w_pos = 1.0
-w_sm = 0.1
-w_en = 1.0
-w_av = 0.0  # angular velocity penalty weight (temporarily disabled)
-k = 0.2 # tanh gain param
+w_pos = 1.0       # uprightness reward weight
+w_sm = 2.0        # action-smoothness (rate) penalty weight -- suppresses jitter
+w_en = 0.03       # energy (torque) penalty weight -- small so it doesn't slow righting
+w_bonus = 1.0     # bonus when BOTH bodies are upright (up_f, up_r > up_thresh)
+up_thresh = 0.95  # per-body uprightness threshold for the success bonus (~26 deg tilt)
 init_ang_vel_max = 0.0  # rad/s, per-axis range for random initial tumble
+filter_alpha = 0.3  # action low-pass gain (1.0 = no filter, smaller = smoother)
 # --------------------------
 
 class CatEnv(MujocoEnv, EzPickle):
@@ -83,6 +84,12 @@ class CatEnv(MujocoEnv, EzPickle):
             executed_action = self.action_buffer.pop(0)
         else:
             executed_action = action.copy()
+
+        # First-order low-pass on the commanded (normalized) target: suppresses
+        # high-frequency action reversals / jitter and mirrors the hardware's
+        # actuator + PD low-pass. State persists across steps, reset per episode.
+        self.action_filt = filter_alpha * executed_action + (1.0 - filter_alpha) * self.action_filt
+        executed_action = self.action_filt.copy()
 
         # PD control
         roll_range = self.model.jnt_range[1][1]
@@ -176,6 +183,9 @@ class CatEnv(MujocoEnv, EzPickle):
         zero_action = np.zeros(self.action_space.shape)
         self.action_buffer = [zero_action.copy() for _ in range(self.action_delay)]
 
+        # Action low-pass filter state (starts neutral)
+        self.action_filt = np.zeros(self.action_space.shape, dtype=np.float32)
+
         # Set physics params
         mujoco.mj_setConst(self.model, self.data)
 
@@ -237,52 +247,34 @@ class CatEnv(MujocoEnv, EzPickle):
         front_quat = self.data.xquat[self._body_idx["front_body"]]
         rear_quat = self.data.xquat[self._body_idx["rear_body"]]
 
-        # rotation matricies
-        r_front = R.from_quat(front_quat, scalar_first=True)
-        r_rear = R.from_quat(rear_quat, scalar_first=True)
+        # World-frame body up-vectors (local +z mapped to world).
+        front_up = R.from_quat(front_quat, scalar_first=True).apply([0, 0, 1])
+        rear_up = R.from_quat(rear_quat, scalar_first=True).apply([0, 0, 1])
 
-        # transform local z vectors to global
-        front_up = r_front.apply([0, 0, 1])
-        rear_up = r_rear.apply([0, 0, 1])
+        # Per-body uprightness in [0, 1] (up[2] = cos(tilt); 1 = perfectly upright).
+        up_f = 0.5 * (front_up[2] + 1.0)
+        up_r = 0.5 * (rear_up[2] + 1.0)
 
-        angle_front = np.arccos(np.clip(front_up[2], -1.0, 1.0))
-        angle_rear = np.arccos(np.clip(rear_up[2], -1.0, 1.0))
-        
-        # get z component and scale
-        reward_front = 1.0 - (angle_front / np.pi)
-        reward_rear = 1.0 - (angle_rear / np.pi)
-        
-        r_pos = reward_front*reward_rear
-        r_pos *= np.tanh(self.steps*k)
-        
-        delta = action - self.prev_action
-        r_sm = np.mean(delta**2) * w_sm
+        # Dense, per-step, NO time ramp: every upright step counts, so under the SAC
+        # discount (gamma < 1) the optimal policy rights ASAP and holds. The sum term
+        # gives each body an independent gradient (no vanishing when the other is
+        # inverted); the product term rewards true "both upright" simultaneously.
+        r_pos = w_pos * (0.5 * (up_f + up_r) + up_f * up_r)
 
-        ctrl = self.data.ctrl
-        r_en = np.mean(ctrl**2) * w_en
+        # Success bonus: crisp "reach upright and stay" signal once both are upright.
+        r_bonus = w_bonus if (up_f > up_thresh and up_r > up_thresh) else 0.0
 
-        # Angular velocity penalty (time-scaled: tolerated during rotation phase,
-        # penalized as we approach landing)
-        front_vel = np.zeros(6)
-        mujoco.mj_objectVelocity(self.model, self.data, mujoco.mjtObj.mjOBJ_BODY,
-                                 self._body_idx["front_body"], front_vel, 1)
-        rear_vel = np.zeros(6)
-        mujoco.mj_objectVelocity(self.model, self.data, mujoco.mjtObj.mjOBJ_BODY,
-                                 self._body_idx["rear_body"], rear_vel, 1)
-        front_ang_vel = front_vel[:3]
-        rear_ang_vel = rear_vel[:3]
-        ang_vel_sq = np.mean(front_ang_vel**2) + np.mean(rear_ang_vel**2)
-        r_av = ang_vel_sq * w_av * np.tanh(self.steps * k)
+        # Light hardware-friendliness penalties (small so they don't slow righting).
+        r_sm = w_sm * np.mean((action - self.prev_action) ** 2)
+        r_en = w_en * np.mean(self.data.ctrl ** 2)
 
-        penalty_factor = np.exp(-(r_sm + r_en + r_av))
-
-        final_reward = r_pos * penalty_factor
+        final_reward = r_pos + r_bonus - r_sm - r_en
         reward_info = {
             "r_pos": r_pos,
+            "r_bonus": r_bonus,
             "r_sm": r_sm,
             "r_en": r_en,
-            "r_av": r_av,
-            "penalty_factor": penalty_factor
+            "up_mean": 0.5 * (up_f + up_r),
         }
 
         return final_reward, reward_info

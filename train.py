@@ -16,10 +16,10 @@ class TensorboardRewardCallback(BaseCallback):
             if "r_pos" in info:
                 # Log each term under a "rewards/" group in TensorBoard
                 self.logger.record("rewards/r_pos", info["r_pos"])
+                self.logger.record("rewards/r_bonus", info["r_bonus"])
                 self.logger.record("rewards/r_sm", info["r_sm"])
                 self.logger.record("rewards/r_en", info["r_en"])
-                self.logger.record("rewards/r_av", info["r_av"])
-                self.logger.record("rewards/penalty_factor", info["penalty_factor"])
+                self.logger.record("rewards/up_mean", info["up_mean"])
         return True
 
 def train():
@@ -54,13 +54,13 @@ def train():
     reward_callback = TensorboardRewardCallback()
 
     model.learn(
-        total_timesteps=2_000_000,
+        total_timesteps=1_000_000,
         log_interval=20,
         progress_bar=True,
         callback=reward_callback
     )
 
-    model_path = f"cat_controller_{str(time.time())}.zip"
+    model_path = f"cat_controller_{time.strftime('%Y%m%d-%H%M%S')}.zip"
     model.save(model_path)
     print(f"Model saved")
 

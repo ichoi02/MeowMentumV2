@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from stable_baselines3 import SAC
+from scipy.spatial.transform import Rotation as R
 import cat_env
 import cat_env.env_util as util
 import time
@@ -17,39 +18,43 @@ else:
     device = torch.device("cpu")
 print(f"Using device: {device}")
 
-# Full obs layout (see cat_env/cat_env.py::_get_obs):
-#   [0:9]    front_body_rot
-#   [9:18]   rear_body_rot
-#   [18:21]  front_gyro
-#   [21:24]  rear_gyro
-#   [24:35]  qpos (7 free + 4 joints)  -> joint angles at [31:35]
-# Only the front body carries an IMU on the real robot, so the student sees front_body_rot.
-FRONT_ROT_SLICE = slice(0, 9)
-JOINT_ANGLE_SLICE = slice(24 + 7, 24 + 7 + 4)
+# Full obs layout (see cat_env/cat_env.py::_get_obs; 25-dim, yaw-invariant):
+#   [0:3]    front_proj_grav   (front-body gravity direction; front IMU on real robot)
+#   [3:6]    rear_proj_grav
+#   [6:9]    front_gyro
+#   [9:12]   rear_gyro
+#   [12:16]  joint angles (rot1, pitch, rot2, tail)
+#   [16:20]  joint velocities
+#   [20:24]  ctrl
+#   [24]     step
+# The real robot has only the FRONT IMU + joint encoders, so the student sees
+# front_proj_grav (yaw-invariant, matching the teacher) + joint angles.
+FRONT_GRAV_SLICE = slice(0, 3)
+JOINT_ANGLE_SLICE = slice(12, 16)
 
-ROT_DIM = 9
+GRAV_DIM = 3
 JOINT_DIM = 4
-FRAME_DIM = ROT_DIM + JOINT_DIM      # single-timestep student features
-STUDENT_OBS_DIM = 2 * FRAME_DIM      # two stacked timesteps: t-1 and t
+FRAME_DIM = GRAV_DIM + JOINT_DIM        # single-timestep student features (7)
+N_FRAMES = 4                            # number of stacked timesteps of history
+STUDENT_OBS_DIM = N_FRAMES * FRAME_DIM  # stacked history (28)
 
-def get_noisy_student_frame(full_obs, rot_noise_std=0.01, joint_noise_std=0.02):
-    """One timestep of what the student is allowed to see: [front_rot(9), joint_angles(4)]."""
-    front_rot = full_obs[FRONT_ROT_SLICE].copy()
+def get_noisy_student_frame(full_obs, grav_noise_std=0.02, joint_noise_std=0.02):
+    """One timestep of what the student is allowed to see: [front_proj_grav(3), joint_angles(4)]."""
+    front_grav = full_obs[FRONT_GRAV_SLICE].copy()
     joint_angles = full_obs[JOINT_ANGLE_SLICE].copy()
 
-    noisy_rot = util.add_rotational_noise(front_rot, rot_noise_std)
+    # IMU tilt/orientation error: perturb the gravity direction by a small random rotation.
+    noisy_grav = R.from_rotvec(np.random.normal(0.0, grav_noise_std, 3)).apply(front_grav)
     noisy_joints = util.add_gaussian_noise(joint_angles, joint_noise_std)
 
-    return np.concatenate([noisy_rot, noisy_joints])
+    return np.concatenate([noisy_grav, noisy_joints])
 
-def stack_frames(prev_frame, curr_frame):
-    """[front_rot_{t-1}, front_rot_t, joint_angles_{t-1}, joint_angles_t]"""
-    return np.concatenate([
-        prev_frame[:ROT_DIM],
-        curr_frame[:ROT_DIM],
-        prev_frame[ROT_DIM:],
-        curr_frame[ROT_DIM:],
-    ])
+def stack_frames(frames):
+    """Stack N student frames (oldest -> newest), grouped by feature type:
+    [grav_0..grav_{N-1} (3 each), joints_0..joints_{N-1} (4 each)]."""
+    gravs = [f[:GRAV_DIM] for f in frames]
+    joints = [f[GRAV_DIM:] for f in frames]
+    return np.concatenate(gravs + joints)
 
 # ---- 1. Define the Student Policy ----
 class StudentPolicy(nn.Module):
@@ -71,7 +76,7 @@ class StudentPolicy(nn.Module):
 def collect_data(env, student_policy, expert_policy, num_steps, is_student_acting=False, max_delay=2):
     """
     Rolls out a policy. The expert uses the FULL CURRENT observation.
-    The student uses the DELAYED NOISY observation (two stacked timesteps).
+    The student uses the DELAYED NOISY observation (N_FRAMES stacked timesteps).
     """
     student_states = []
     expert_actions = []
@@ -86,10 +91,10 @@ def collect_data(env, student_policy, expert_policy, num_steps, is_student_actin
         # 1. Extract what the student is allowed to see at this timestep
         obs_buffer.append(get_noisy_student_frame(full_obs))
 
-        # 2. Retrieve the delayed frame plus the one before it
+        # 2. Retrieve the delayed frame plus the (N_FRAMES-1) preceding it (clamped at 0)
         curr_idx = max(len(obs_buffer) - 1 - obs_delay, 0)
-        prev_idx = max(curr_idx - 1, 0)
-        delayed_student_obs = stack_frames(obs_buffer[prev_idx], obs_buffer[curr_idx])
+        frame_idxs = [max(curr_idx - k, 0) for k in reversed(range(N_FRAMES))]
+        delayed_student_obs = stack_frames([obs_buffer[i] for i in frame_idxs])
         student_states.append(delayed_student_obs)
 
         # 3. The Privileged Expert gets the full, current observation to generate ground-truth labels
@@ -119,7 +124,7 @@ def collect_data(env, student_policy, expert_policy, num_steps, is_student_actin
 def run_dagger():
     env = gym.make("Cat-v0")
 
-    # 2 x (9 front rotation matrix + 4 joint angles) = 26 total dimensions
+    # N_FRAMES x (3 front projected gravity + 4 joint angles) total dimensions
     student_obs_dim = STUDENT_OBS_DIM
     act_dim = env.action_space.shape[0]
 
@@ -172,8 +177,7 @@ def run_dagger():
             D_states = D_states[-max_buffer_size:]
             D_actions = D_actions[-max_buffer_size:]
 
-    # Changed save filename to reflect new observation space
-    torch.save(student.state_dict(), f"student_policy_{str(time.time())}.pth")
+    torch.save(student.state_dict(), f"student_policy_{time.strftime('%Y%m%d-%H%M%S')}.pth")
 
 if __name__ == "__main__":
     run_dagger()
