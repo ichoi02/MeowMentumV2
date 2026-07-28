@@ -43,6 +43,7 @@ import argparse
 import numpy as np
 import csv
 import threading
+from collections import deque
 import cat_env.env_util as util
 import socket
 
@@ -53,10 +54,27 @@ SN_BACK  = "18452630"
 BAUD_RATE = 115200
 LOOP_HZ = 50
 
-CONTROL_DURATION = 0.7
+CONTROL_DURATION = 0.74   # sim episode: 37 steps x (1/50 s) = 0.74 s
+
+# --- Policy / sim-matching parameters (MUST match cat_env/cat_env.py + model/cat.xml) ---
+N_FRAMES = 4              # stacked student frames  (distillation.N_FRAMES)
+FILTER_ALPHA = 0.3        # action low-pass gain    (cat_env.filter_alpha)
+GRAV_DIM = 3
+# Joint target ranges (rad), from model/cat.xml jnt_range:
+ROLL_RANGE = 7.28         # rot1 / rot2   (+/-417 deg)
+PITCH_RANGE = 1.57        # pitch         (+/-90 deg)
+TAIL_RANGE = 1.9199       # tail          (+/-110 deg)
 
 # Bound serial draining per tick (~50Hz telemetry per board); unbounded reads starve the Python loop.
 SERIAL_DRAIN_MAX_LINES = 32
+
+def stack_frames(frames):
+    """Group N student frames (oldest -> newest) by feature type:
+    [grav_0..grav_{N-1} (3 each), joints_0..joints_{N-1} (4 each)].
+    MUST match distillation.stack_frames exactly."""
+    gravs = [f[:GRAV_DIM] for f in frames]
+    joints = [f[GRAV_DIM:] for f in frames]
+    return np.concatenate(gravs + joints)
 
 # Teleplot
 # UDP_IP = "127.0.0.1" 
@@ -380,41 +398,53 @@ def main():
 
     print(f"Starting loop at {LOOP_HZ}Hz. Press Ctrl+C to quit.")
 
+    # Student temporal state (reset per drop). Matches cat_env reset: filter starts
+    # neutral, frame history is prefilled with the first frame on the first tick.
+    frame_hist = deque(maxlen=N_FRAMES)
+    action_filt = np.zeros(3, dtype=np.float32)
+
     try:
-        while(True): 
+        while(True):
             loop_start = time.time()
             t = loop_start - start_time
 
             front.update_sensor_data()
             back.update_sensor_data()
-            
+
             action = [0, 0, 0, 0]
-            # To rotation matrices
-            front_rot = util.to_rotation_matrix(front.quat)
-            back_rot = util.to_rotation_matrix(back.quat)
 
             if args.debug:
                 action = list(debug_action)
             else:
-                # Ensure the joint array matches the exact order used in simulation
+                # --- Build the student observation (MUST match distillation.py) ---
+                # Front IMU orientation -> projected gravity (yaw-invariant, 3-dim).
+                front_grav = util.to_projected_gravity(front.quat)
+                # Joint angles in sim order [rot1, pitch, rot2, tail].
                 joints = np.array([front.m1_rad, front.m2_rad, back.m2_rad, back.m1_rad])
-                
-                # Stack to create a flat 1D array
-                obs = np.hstack((front_rot, joints)) #FIXME
-                
-                # Cast to float32 and add the batch dimension (1, N) for ONNX
-                obs_tensor = np.array(obs, dtype=np.float32).reshape(1, -1)
-                
-                # Run inference
-                # [0] gets the first output node, [0] unpacks the batch dimension
-                raw_action = ort_session.run(None, {input_name: obs_tensor})[0][0]
-                
-                roll = util.map_value(float(raw_action[0]), -1, 1, -np.pi*2, np.pi*2) # roll
-                pitch = util.map_value(float(raw_action[1]), -1, 1, -np.pi/2, np.pi/2) # pitch
-                tail = util.map_value(float(raw_action[2]), -1, 1, -np.pi/2, np.pi/2) # tail
+                frame = np.concatenate([front_grav, joints])   # 3 + 4 = 7
 
+                # Maintain N_FRAMES history; prefill with the first frame on tick 0.
+                if len(frame_hist) == 0:
+                    for _ in range(N_FRAMES):
+                        frame_hist.append(frame)
+                else:
+                    frame_hist.append(frame)
+
+                obs = stack_frames(list(frame_hist))            # 28-dim
+                obs_tensor = np.array(obs, dtype=np.float32).reshape(1, -1)
+
+                # Run ONNX inference -> normalized action in [-1, 1].
+                raw_action = ort_session.run(None, {input_name: obs_tensor})[0][0]
+
+                # Action low-pass filter (MUST match cat_env FILTER_ALPHA).
+                action_filt = FILTER_ALPHA * raw_action + (1.0 - FILTER_ALPHA) * action_filt
+
+                # Map normalized action -> joint target angles (rad), using the sim
+                # jnt_range from model/cat.xml. rot2 mirrors rot1 (rot2 = -rot1).
+                roll  = util.map_value(float(action_filt[0]), -1, 1, -ROLL_RANGE, ROLL_RANGE)
+                pitch = util.map_value(float(action_filt[1]), -1, 1, -PITCH_RANGE, PITCH_RANGE)
+                tail  = util.map_value(float(action_filt[2]), -1, 1, -TAIL_RANGE, TAIL_RANGE)
                 action = [roll, pitch, tail, -roll]
-                # print(action)
 
             front.set_motors(action[0], action[1])
             back.set_motors(action[2], action[3])

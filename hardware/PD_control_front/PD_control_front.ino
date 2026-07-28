@@ -5,8 +5,8 @@
 #include <cstring>
 #include <math.h>
 
-const float M1GEAR = 9.68;
-const float M2GEAR = 9.68;
+const float M1GEAR = 9.68;      // Front M1 = rot1 (roll)
+const float M2GEAR = 34.014;    // Front M2 = pitch
 const int TICKS_PER_REV = 48;
 
 // Motor 1
@@ -38,11 +38,12 @@ bool ENCODER2_REVERSED = true;
 // ==========================================
 // 3. CONTROL SETTINGS
 // ==========================================
-// PD gains
-double Kp1 = 2048.0;
-double Kd1 = 204.8;
+// PD gains = sim pd_nominal * 1024  (sim normalized torque [-1,1] -> PWM [0,1023]).
+// Front M1 = rot1 (roll): sim (kp=5.0, kd=0.4);  Front M2 = pitch: sim (kp=20.0, kd=1.5).
+double Kp1 = 5120.0;
+double Kd1 = 409.6;
 double Kp2 = 20480.0;
-double Kd2 = 204.80;
+double Kd2 = 1536.0;
 
 // If the error is within this many ticks, motor stops
 float deadband = 0.03;

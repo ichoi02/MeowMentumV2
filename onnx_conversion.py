@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import time
@@ -20,8 +21,11 @@ class StudentPolicy(nn.Module):
         return self.net(x)
 
 # --- Configuration ---
-# Update these dimensions to match your specific observation and action spaces
-STATE_DIM = 13
+# Student obs = N_FRAMES stacked frames of [front_proj_grav(3) + joint_angles(4)].
+# Must match cat_env/cat_env.py + distillation.py (STUDENT_OBS_DIM = N_FRAMES * 7).
+N_FRAMES = 4
+FRAME_DIM = 3 + 4
+STATE_DIM = N_FRAMES * FRAME_DIM      # 28
 ACTION_DIM = 3
 PTH_FILE = "student_policy.pth"
 ONNX_FILE = f"cat_controller.onnx"
@@ -69,18 +73,22 @@ def main():
     # 6. Manually patch the Opset version down to 11
     import onnx
     
-    # Load the newly exported opset 14 model
-    onnx_model = onnx.load(ONNX_FILE)
-    
+    # Load the newly exported model (pulling in any external tensor data)
+    onnx_model = onnx.load(ONNX_FILE, load_external_data=True)
+
     # Force the metadata to say opset 11
     for imp in onnx_model.opset_import:
         if imp.domain == "" or imp.domain == "ai.onnx":
             imp.version = 11
-            
-    # Overwrite the file
-    onnx.save(onnx_model, ONNX_FILE)
-    
-    print(f"Success! {ONNX_FILE} has been safely patched to Opset 11.")
+
+    # Overwrite as a SINGLE self-contained file (no .onnx.data sidecar) so the Pi
+    # only needs to copy one file.
+    onnx.save(onnx_model, ONNX_FILE, save_as_external_data=False)
+    sidecar = ONNX_FILE + ".data"
+    if os.path.exists(sidecar):
+        os.remove(sidecar)
+
+    print(f"Success! {ONNX_FILE} has been safely patched to Opset 11 (single file).")
 
 if __name__ == "__main__":
     main()

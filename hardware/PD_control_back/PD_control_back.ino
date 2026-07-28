@@ -3,8 +3,8 @@
 #include <cstring>
 #include <math.h>
 
-const float M1GEAR = 9.68;
-const float M2GEAR = 9.68;
+const float M1GEAR = 34.014;    // Back M1 = tail
+const float M2GEAR = 9.68;      // Back M2 = rot2 (roll)
 const int TICKS_PER_REV = 48;
 
 // Motor 1
@@ -33,11 +33,12 @@ bool ENCODER2_REVERSED = true;
 // ==========================================
 // 3. CONTROL SETTINGS
 // ==========================================
-// PD gains
-double Kp1 = 1024.0;
-double Kd1 = 10.24;
-double Kp2 = 1024.0;
-double Kd2 = 102.4;
+// PD gains = sim pd_nominal * 1024  (sim normalized torque [-1,1] -> PWM [0,1023]).
+// Back M1 = tail: sim (kp=30.0, kd=1.0);  Back M2 = rot2 (roll): sim (kp=5.0, kd=0.4).
+double Kp1 = 30720.0;
+double Kd1 = 1024.0;
+double Kp2 = 5120.0;
+double Kd2 = 409.6;
 
 // If the error is within this many ticks, motor stops
 float deadband = 0.03;
