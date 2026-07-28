@@ -13,12 +13,12 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
 
 ```
   MuJoCo sim (Cat-v0)                     hardware
-  ┌───────────────────┐   distill   ┌──────────────────────────────┐
-  │ SAC teacher        │──DAgger──▶ │ student MLP (partial obs)     │
-  │ (privileged obs)   │            │  → ONNX → Raspberry Pi        │
-  └───────────────────┘            │  → serial → 2× Teensy (PD)    │
-        train.py                    └──────────────────────────────┘
-     cat_env/  model/                  onnx_conversion.py  hardware/
+  ┌───────────────────┐   distill  ┌──────────────────────────────┐
+  │ SAC teacher       │──DAgger──▶ │ student MLP (partial obs)    │
+  │ (privileged obs)  │            │  → ONNX → Raspberry Pi       │
+  └───────────────────┘            │  → serial → 2× Teensy (PD)   │
+        train.py                   └──────────────────────────────┘
+     cat_env/  model/                 onnx_conversion.py  hardware/
 ```
 
 1. **Train** a privileged SAC *teacher* in sim on the full state (`train.py`).
@@ -38,7 +38,6 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
 | `train.py` | SAC teacher training + TensorBoard reward logging |
 | `distillation.py` | DAgger distillation of teacher → student (partial obs, frame-stacked) |
 | `test.py` | MuJoCo viewer for the teacher or student policy |
-| `visualize.py` | Replay a hardware telemetry CSV in MuJoCo (with rear-IMU ghost) |
 | `onnx_conversion.py` | Export the student `.pth` → `cat_controller.onnx` (opset 11, single file) |
 | `hardware/controller.py` | Raspberry Pi control loop: read IMUs/encoders → ONNX → motor targets |
 | `hardware/PD_control_{front,back}/*.ino` | Teensy 4.0 firmware: 1 kHz PD, BNO08x IMU, serial protocol |
@@ -125,13 +124,8 @@ python hardware/reconstruct_viz.py --source serial --out recon.npz --duration 10
 python hardware/reconstruct_viz_view.py recon.npz        # desktop: replay in MuJoCo
 ```
 
-## Sim-to-real notes
+## notes
 
-- **Yaw is unobservable** by design (yaw-invariant obs), so reconstructions may sit at an
-  arbitrary heading — expected.
-- **Verify the sim pitch/tail motor model** matches the real 34.014:1-geared motors
-  (`ctrlrange` / `dof_damping` / `dof_armature` in `model/cat.xml`); a same-base-motor
-  assumption implies ~0.6 N·m / ~228 rpm at the output, vs the current 1.1 N·m / ~309 rpm.
 - **`env_util.reverse_align_imu_quaternions` is not the true inverse** of
   `controller.py::align_imu_quaternions` (one-sided vs two-sided transform); the
   reconstruction tools define the correct inverse locally.
