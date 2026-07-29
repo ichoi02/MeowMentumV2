@@ -34,8 +34,8 @@ bool ENCODER2_REVERSED = true;
 // 3. CONTROL SETTINGS
 // ==========================================
 // PD gains
-double Kp1 = 2048.0;
-double Kd1 = 204.8;
+double Kp1 = 4096.0;
+double Kd1 = 614.4;
 double Kp2 = 1024.0;
 double Kd2 = 102.4;
 

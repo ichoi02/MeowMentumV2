@@ -8,10 +8,10 @@ reconstructed pose per frame. Copy that .npz to a machine with a display and run
   python hardware/reconstruct_viz_view.py recon.npz --fps 30 --loop
 
 Each frame sets the root orientation (recovered from the front IMU's projected
-gravity) + joint angles and runs forward kinematics. The rear-IMU cross-check saved
-by the Pi is printed live (near 0 = consistent; several degrees = calibration/model
-mismatch to fix before a real drop). Heading (yaw) is unobservable, so the robot may
-sit at an arbitrary yaw -- expected, and exactly why the policy is yaw-invariant.
+gravity) + joint angles and runs forward kinematics. There is no rear IMU; check
+visually that the pose matches the physical robot. Heading (yaw) is unobservable,
+so the robot may sit at an arbitrary yaw -- expected, and exactly why the policy
+is yaw-invariant.
 """
 import os
 import sys
@@ -38,12 +38,10 @@ def main():
     d = np.load(args.file, allow_pickle=True)
     root_quat = d["root_quat"]
     joints = d["joints"]
-    rear_err = d["rear_err_deg"]
     root_height = float(d["root_height"]) if "root_height" in d else 1.5
     n = len(root_quat)
     src = str(d["source"]) if "source" in d else "?"
     print(f"Loaded {n} frames (source={src}) from {args.file}")
-    print(f"rear cross-check deg: mean {rear_err.mean():.3f}, max {rear_err.max():.3f}")
 
     model = mujoco.MjModel.from_xml_path(MODEL_PATH)
     data = mujoco.MjData(model)
@@ -76,8 +74,7 @@ def main():
                     data.qpos[jadr["rot2"]] = joints[i, 2]
                     data.qpos[jadr["tail"]] = joints[i, 3]
                     mujoco.mj_kinematics(model, data)
-                    print(f"\rframe {i+1}/{n}   rear cross-check: {rear_err[i]:6.2f} deg   ",
-                          end="", flush=True)
+                    print(f"\rframe {i+1}/{n}   ", end="", flush=True)
                     viewer.sync()
                     sleep = frame_dt - (time.time() - t0)
                     if sleep > 0:
