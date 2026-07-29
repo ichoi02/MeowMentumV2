@@ -3,8 +3,8 @@
 #include <cstring>
 #include <math.h>
 
-const float M1GEAR = 34.014;    // Back M1 = tail
-const float M2GEAR = 9.68;      // Back M2 = rot2 (roll)
+const float M1GEAR = 34.0;
+const float M2GEAR = 9.68;
 const int TICKS_PER_REV = 48;
 
 // Motor 1
@@ -33,12 +33,11 @@ bool ENCODER2_REVERSED = true;
 // ==========================================
 // 3. CONTROL SETTINGS
 // ==========================================
-// PD gains = sim pd_nominal * 1024  (sim normalized torque [-1,1] -> PWM [0,1023]).
-// Back M1 = tail: sim (kp=30.0, kd=1.0);  Back M2 = rot2 (roll): sim (kp=5.0, kd=0.4).
-double Kp1 = 30720.0;
-double Kd1 = 1024.0;
-double Kp2 = 5120.0;
-double Kd2 = 409.6;
+// PD gains
+double Kp1 = 2048.0;
+double Kd1 = 204.8;
+double Kp2 = 1024.0;
+double Kd2 = 102.4;
 
 // If the error is within this many ticks, motor stops
 float deadband = 0.03;
@@ -62,14 +61,14 @@ float lastErr2 = 0;
 uint32_t lastControlMicros = 0;
 uint32_t lastPrintMillis = 0;
 
-float imu_qr = 1.0, imu_qi = 0.0, imu_qj = 0.0, imu_qk = 0.0;
-float acc_mag = 0.0;
-
 // ==========================================
-// 6. SETUP
+// 5. SETUP
 // ==========================================
 void setup() {
   Serial.begin(115200);
+  while (!Serial && millis() < 2000) {
+  }
+  Serial.println("# FIRMWARE PD_control_back EXPECT_SN=18452630");
 
   pinMode(M1INA, OUTPUT);
   pinMode(M1INB, OUTPUT);
@@ -99,12 +98,12 @@ void setup() {
 }
 
 // ==========================================
-// 7. MAIN LOOP
+// 6. MAIN LOOP
 // ==========================================
 void loop() {
   handleSerialInput();
 
-  // 4. Run Controller
+  // Run Controller
   uint32_t nowMicros = micros();
   if ((uint32_t)(nowMicros - lastControlMicros) >= CONTROL_PERIOD_US) {
     double dt = (nowMicros - lastControlMicros) / 1000000.0;
@@ -112,17 +111,18 @@ void loop() {
     runController(dt);
   }
 
-  // 5. Print Telemetry
+  // Print Telemetry (no IMU — stub identity quat + zero accel)
+  // Format: qr,qi,qj,qk,angle1,angle2,acc_mag
   uint32_t nowMillis = millis();
   if ((uint32_t)(nowMillis - lastPrintMillis) >= PRINT_PERIOD_MS) {
     lastPrintMillis = nowMillis;
-    
+
     float angle1 = readEncoder1();
     float angle2 = readEncoder2();
-    
+
     int n = snprintf(s_telemBuf, sizeof(s_telemBuf),
                      "%.6f,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f\n",
-                     imu_qr, imu_qi, imu_qj, imu_qk, angle1, angle2, acc_mag);
+                     1.0f, 0.0f, 0.0f, 0.0f, angle1, angle2, 0.0f);
     if (n > 0 && n < (int)sizeof(s_telemBuf) &&
         Serial.availableForWrite() >= n) {
       Serial.write((const uint8_t *)s_telemBuf, (size_t)n);
@@ -131,7 +131,7 @@ void loop() {
 }
 
 // ==========================================
-// 8. CONTROL LOOP
+// 7. CONTROL LOOP
 // ==========================================
 void runController(double dt) {
   if (dt <= 0.0) {
@@ -168,7 +168,7 @@ void runController(double dt) {
 }
 
 // ==========================================
-// 9. SERIAL INPUT (non-blocking)
+// 8. SERIAL INPUT (non-blocking)
 // ==========================================
 static void processSerialLine(char *line) {
   while (*line == ' ' || *line == '\t') line++;
@@ -194,10 +194,8 @@ static void processSerialLine(char *line) {
     }
     delay(100);
     SCB_AIRCR = 0x05FA0004;
-  } else if (strcmp(line, "RESET_IMU") == 0) {
-    
-  } else if (strcmp(line, "RESET_I2C") == 0) {
-    
+  } else if (strcmp(line, "RESET_IMU") == 0 || strcmp(line, "RESET_I2C") == 0) {
+    // No IMU on back board — ignore
   } else {
     float a, b;
     if (sscanf(line, "%f,%f", &a, &b) == 2) {
@@ -230,7 +228,7 @@ void handleSerialInput() {
 }
 
 // ==========================================
-// 10. TELEMETRY ENCODERS
+// 9. TELEMETRY ENCODERS
 // ==========================================
 float readEncoder1() {
   long pos = enc1.read();
@@ -245,7 +243,7 @@ float readEncoder2() {
 }
 
 // ==========================================
-// 11. MOTOR DRIVE FUNCTIONS
+// 10. MOTOR DRIVE FUNCTIONS
 // ==========================================
 void driveMotor1(double speed) {
   int pwmVal = constrain((int)abs(speed), 0, PWM_MAX);

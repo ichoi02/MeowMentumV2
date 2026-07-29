@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Compile hardware/PD_control_front and hardware/PD_control_back, then flash each hex to
 # the matching Teensy (SN_FRONT / SN_BACK from hardware/controller.py).
-# teensy_loader_cli cannot select by USB serial; on each step put only that board in
-# bootloader (program button) — the script prints role + serial to match hardware.
+#
+# IMPORTANT: teensy_loader_cli CANNOT select by USB serial. It programs whichever
+# board is in HalfKay bootloader. Wrong program-button / both boards in bootloader
+# = swapped firmware. This script forces an unplug-the-other-board workflow and
+# verifies the firmware ID banner on the expected SN after each flash.
 #
 # Prerequisites: conda env cat + arduino-cli, teensy-loader-cli, PJRC udev rules.
 #
@@ -271,17 +274,118 @@ if [[ "$DO_COMPILE" -eq 1 && "$DO_FLASH" -eq 0 ]]; then
   exit 0
 fi
 
+list_teensy_sns() {
+  python3 <<'PY'
+import serial.tools.list_ports
+for p in serial.tools.list_ports.comports():
+    if p.serial_number and (p.vid == 0x16C0 or "Teensy" in (p.description or "") or "16C0" in (p.hwid or "").upper()):
+        print(f"{p.serial_number}\t{p.device}")
+PY
+}
+
+print_sn_map() {
+  local sn_front="$1" sn_back="$2"
+  echo "Currently enumerated Teensy serial ports:"
+  local found=0
+  while IFS=$'\t' read -r sn dev; do
+    found=1
+    role="(unknown SN)"
+    [[ "$sn" == "$sn_front" ]] && role="FRONT (controller.py SN_FRONT)"
+    [[ "$sn" == "$sn_back" ]] && role="BACK  (controller.py SN_BACK)"
+    echo "  SN=${sn}  ${dev}  <- ${role}"
+  done < <(list_teensy_sns)
+  if [[ "$found" -eq 0 ]]; then
+    echo "  (none — board may already be in bootloader)"
+  fi
+}
+
+verify_firmware_on_sn() {
+  local role="$1" expect_sn="$2" expect_tag="$3"
+  python3 - "$expect_sn" "$expect_tag" "$role" <<'PY'
+import sys, time
+import serial, serial.tools.list_ports
+
+expect_sn, expect_tag, role = sys.argv[1], sys.argv[2], sys.argv[3]
+path = None
+deadline = time.time() + 12.0
+while time.time() < deadline and path is None:
+    for p in serial.tools.list_ports.comports():
+        if p.serial_number == expect_sn:
+            path = p.device
+            break
+    if path is None:
+        time.sleep(0.25)
+if path is None:
+    print(f"VERIFY FAIL: {role} SN={expect_sn} did not reappear on USB after flash.", file=sys.stderr)
+    sys.exit(1)
+
+# Opening usually resets; keep boot banner.
+ser = serial.Serial(path, 115200, timeout=0.1)
+try:
+    time.sleep(0.15)
+    end = time.time() + 3.0
+    buf = ""
+    while time.time() < end:
+        chunk = ser.read(512)
+        if chunk:
+            buf += chunk.decode("utf-8", errors="replace")
+finally:
+    ser.close()
+
+if expect_tag not in buf:
+    print(f"VERIFY FAIL: {role} SN={expect_sn} ({path}) missing banner {expect_tag!r}", file=sys.stderr)
+    print("--- first lines ---", file=sys.stderr)
+    for ln in buf.splitlines()[:12]:
+        print(f"  {ln}", file=sys.stderr)
+    print(
+        "Wrong hex was likely flashed to this SN (teensy_loader_cli flashes "
+        "whichever board is in bootloader).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+print(f"VERIFY OK: {role} SN={expect_sn} ({path}) has {expect_tag}")
+PY
+}
+
+# Resolve SNs once for prompts / verify
+SN_FRONT_VAL=""
+SN_BACK_VAL=""
+for line in "${FLASH_ORDER[@]}"; do
+  IFS=$'\t' read -r role serial <<<"$line"
+  [[ "$role" == "Front" ]] && SN_FRONT_VAL="$serial"
+  [[ "$role" == "Back" ]] && SN_BACK_VAL="$serial"
+done
+
+echo "========================================"
+echo "FLASH SAFETY (read this)"
+echo "  teensy_loader_cli cannot choose by SN."
+echo "  It programs WHICHEVER board is in bootloader."
+echo "  For each step: unplug the OTHER Teensy USB,"
+echo "  then press program on the TARGET board only."
+echo "========================================"
+print_sn_map "$SN_FRONT_VAL" "$SN_BACK_VAL"
+echo ""
+
 step=1
 for line in "${FLASH_ORDER[@]}"; do
   IFS=$'\t' read -r role serial <<<"$line"
   case "$role" in
-    Front) HEX="$HEX_FRONT"
+    Front)
+      HEX="$HEX_FRONT"
+      OTHER_ROLE="BACK"
+      OTHER_SN="$SN_BACK_VAL"
+      EXPECT_TAG="PD_control_front"
       if [[ -z "$HEX" ]]; then
         echo "Internal error: Front selected but HEX_FRONT empty."
         exit 1
       fi
       ;;
-    Back) HEX="$HEX_BACK"
+    Back)
+      HEX="$HEX_BACK"
+      OTHER_ROLE="FRONT"
+      OTHER_SN="$SN_FRONT_VAL"
+      EXPECT_TAG="PD_control_back"
       if [[ -z "$HEX" ]]; then
         echo "Internal error: Back selected but HEX_BACK empty."
         exit 1
@@ -292,14 +396,35 @@ for line in "${FLASH_ORDER[@]}"; do
       exit 1
       ;;
   esac
-  echo ">>> Step $step: ${role} (USB serial ${serial}) <<<"
-  echo "    Firmware: $(basename "$HEX")"
-  echo "    Press the program button on THIS board only (or put only it in bootloader)."
+
+  echo ">>> Step $step: flash ${role} firmware <<<"
+  echo "    Hex:    $(basename "$HEX")"
+  echo "    Target: ${role} USB serial ${serial}"
+  if [[ -n "$OTHER_SN" ]]; then
+    echo "    1) UNPLUG the ${OTHER_ROLE} Teensy (SN=${OTHER_SN}) USB cable."
+  else
+    echo "    1) Unplug any other Teensy USB cable."
+  fi
+  echo "    2) Leave ONLY the ${role} board (SN=${serial}) plugged in."
+  echo "    3) Press the PROGRAM button on that ${role} board."
+  echo "    4) Press Enter here to run teensy_loader_cli…"
+  print_sn_map "$SN_FRONT_VAL" "$SN_BACK_VAL"
+  read -r _
+
   if ! teensy_loader_cli --mcu="$MCU" -w -v "$HEX"; then
     echo "USB error, retrying..."
     sleep 1
     teensy_loader_cli --mcu="$MCU" -w -v "$HEX"
   fi
+
+  echo "Waiting for ${role} SN=${serial} to reboot and checking firmware banner…"
+  if ! verify_firmware_on_sn "$role" "$serial" "$EXPECT_TAG"; then
+    echo ""
+    echo "Flash aborted after verify failure. Re-run this step after fixing which"
+    echo "board is in bootloader. Tip: keep the other Teensy unplugged."
+    exit 1
+  fi
+  echo "You may replug the other Teensy now."
   echo ""
   ((step++)) || true
 done
@@ -314,3 +439,4 @@ else
 fi
 printf -v _done_summary '%s; ' "${done_msg[@]}"
 echo "Done. ${_done_summary%; }"
+echo "Confirm both boards: python test/identify_teensy_firmware.py"
