@@ -5,6 +5,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 import cat_env
 import time
+from variants import VARIANTS
 
 class TensorboardRewardCallback(BaseCallback):
     def __init__(self, verbose=0):
@@ -22,11 +23,12 @@ class TensorboardRewardCallback(BaseCallback):
                 self.logger.record("rewards/up_mean", info["up_mean"])
         return True
 
-def train():
+def train(variant="tail"):
+    cfg = VARIANTS[variant]
     num_cpu = 10
 
     env = make_vec_env(
-        "Cat-v0",
+        cfg["env_id"],
         n_envs=num_cpu,
         vec_env_cls=SubprocVecEnv,
         #env_kwargs={"render_mode": "rgb_array"}
@@ -60,9 +62,14 @@ def train():
         callback=reward_callback
     )
 
-    model_path = f"cat_controller_{time.strftime('%Y%m%d-%H%M%S')}.zip"
+    model_path = f"cat_controller{cfg['suffix']}_{time.strftime('%Y%m%d-%H%M%S')}.zip"
     model.save(model_path)
-    print(f"Model saved")
+    print(f"Model saved to {model_path}")
 
 if __name__ == "__main__":
-    train()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--variant", choices=list(VARIANTS), default="tail",
+                         help="ablation condition to train (default: tail)")
+    args = parser.parse_args()
+    train(args.variant)

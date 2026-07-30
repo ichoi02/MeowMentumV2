@@ -11,24 +11,25 @@ from distillation import (
     StudentPolicy, stack_frames, STUDENT_OBS_DIM, N_FRAMES,
     FRONT_GRAV_SLICE, JOINT_ANGLE_SLICE,
 )
+from variants import VARIANTS
 
 def student_frame(full_obs):
     """Clean (noise-free) single student frame: [front_proj_grav(3), joint_angles(4)]."""
     return np.concatenate([full_obs[FRONT_GRAV_SLICE], full_obs[JOINT_ANGLE_SLICE]])
 
-def visualize():
-    env = gym.make("Cat-v0")
+def visualize(variant="tail", agent="student"):
+    cfg = VARIANTS[variant]
+    env = gym.make(cfg["env_id"])
 
-    agent = 'student'
     if agent == 'teacher':
         print("Loading teacher policy")
-        teacher = SAC.load("cat_controller")
+        teacher = SAC.load(f"cat_controller{cfg['suffix']}")
     elif agent =='student':
         print("Loading student policy")
         student_obs_dim = STUDENT_OBS_DIM
         act_dim = env.action_space.shape[0]
         student = StudentPolicy(student_obs_dim, act_dim)
-        student.load_state_dict(torch.load("student_policy.pth", map_location="cpu"))
+        student.load_state_dict(torch.load(f"student_policy{cfg['suffix']}.pth", map_location="cpu"))
         student.eval()
 
     obs, _ = env.reset()
@@ -81,4 +82,11 @@ def visualize():
             env.close()
 
 if __name__ == "__main__":
-    visualize()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--variant", choices=list(VARIANTS), default="tail",
+                         help="ablation condition to view (default: tail)")
+    parser.add_argument("--agent", choices=["student", "teacher"], default="student",
+                         help="policy to view (default: student)")
+    args = parser.parse_args()
+    visualize(args.variant, args.agent)

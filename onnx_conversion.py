@@ -2,6 +2,7 @@ import os
 import torch
 import torch.nn as nn
 import time
+from variants import VARIANTS
 
 # 1. Define your policy/model architecture. 
 # This MUST exactly match the structure used during your RL training loop.
@@ -23,14 +24,16 @@ class StudentPolicy(nn.Module):
 # --- Configuration ---
 # Student obs = N_FRAMES stacked frames of [front_proj_grav(3) + joint_angles(4)].
 # Must match cat_env/cat_env.py + distillation.py (STUDENT_OBS_DIM = N_FRAMES * 7).
-N_FRAMES = 4
+N_FRAMES = 2
 FRAME_DIM = 3 + 4
-STATE_DIM = N_FRAMES * FRAME_DIM      # 28
+STATE_DIM = N_FRAMES * FRAME_DIM      # 14
 ACTION_DIM = 3
-PTH_FILE = "student_policy.pth"
-ONNX_FILE = f"cat_controller.onnx"
 
-def main():
+def main(variant="tail"):
+    suffix = VARIANTS[variant]["suffix"]
+    PTH_FILE = f"student_policy{suffix}.pth"
+    ONNX_FILE = f"cat_controller{suffix}.onnx"
+
     # 2. Instantiate the model and load the trained weights
     model = StudentPolicy(STATE_DIM, ACTION_DIM)
     
@@ -91,4 +94,9 @@ def main():
     print(f"Success! {ONNX_FILE} has been safely patched to Opset 11 (single file).")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--variant", choices=list(VARIANTS), default="tail",
+                         help="ablation condition to export (default: tail)")
+    args = parser.parse_args()
+    main(args.variant)

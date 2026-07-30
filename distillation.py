@@ -9,6 +9,7 @@ from scipy.spatial.transform import Rotation as R
 import cat_env
 import cat_env.env_util as util
 import time
+from variants import VARIANTS
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
@@ -35,8 +36,8 @@ JOINT_ANGLE_SLICE = slice(12, 16)
 GRAV_DIM = 3
 JOINT_DIM = 4
 FRAME_DIM = GRAV_DIM + JOINT_DIM        # single-timestep student features (7)
-N_FRAMES = 4                            # number of stacked timesteps of history
-STUDENT_OBS_DIM = N_FRAMES * FRAME_DIM  # stacked history (28)
+N_FRAMES = 2                            # number of stacked timesteps of history
+STUDENT_OBS_DIM = N_FRAMES * FRAME_DIM  # stacked history (14)
 
 def get_noisy_student_frame(full_obs, grav_noise_std=0.02, joint_noise_std=0.02):
     """One timestep of what the student is allowed to see: [front_proj_grav(3), joint_angles(4)]."""
@@ -121,15 +122,16 @@ def collect_data(env, student_policy, expert_policy, num_steps, is_student_actin
     return np.array(student_states), np.array(expert_actions)
 
 # ---- 3. Main DAgger Loop ----
-def run_dagger():
-    env = gym.make("Cat-v0")
+def run_dagger(variant="tail"):
+    cfg = VARIANTS[variant]
+    env = gym.make(cfg["env_id"])
 
     # N_FRAMES x (3 front projected gravity + 4 joint angles) total dimensions
     student_obs_dim = STUDENT_OBS_DIM
     act_dim = env.action_space.shape[0]
 
     print("Loading privileged expert policy...")
-    expert = SAC.load("cat_controller")
+    expert = SAC.load(f"cat_controller{cfg['suffix']}")
 
     # Initialize Student with restricted observation space
     student = StudentPolicy(student_obs_dim, act_dim)
@@ -177,7 +179,12 @@ def run_dagger():
             D_states = D_states[-max_buffer_size:]
             D_actions = D_actions[-max_buffer_size:]
 
-    torch.save(student.state_dict(), f"student_policy_{time.strftime('%Y%m%d-%H%M%S')}.pth")
+    torch.save(student.state_dict(), f"student_policy{cfg['suffix']}_{time.strftime('%Y%m%d-%H%M%S')}.pth")
 
 if __name__ == "__main__":
-    run_dagger()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--variant", choices=list(VARIANTS), default="tail",
+                         help="ablation condition to distill (default: tail)")
+    args = parser.parse_args()
+    run_dagger(args.variant)

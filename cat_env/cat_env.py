@@ -21,9 +21,9 @@ filter_alpha = 0.3  # action low-pass gain (1.0 = no filter, smaller = smoother)
 class CatEnv(MujocoEnv, EzPickle):
     metadata = {"render_modes": ["human", "rgb_array", "depth_array"], "render_fps": 50}
 
-    def __init__(self, render_mode=None):
-        model_path = os.path.abspath("model/cat.xml")
-        
+    def __init__(self, model_path="model/cat.xml", render_mode=None):
+        model_path = os.path.abspath(model_path)
+
         observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(25,), dtype=np.float32)
         action_space = spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32)
 
@@ -36,7 +36,7 @@ class CatEnv(MujocoEnv, EzPickle):
             render_mode=render_mode
         )
         self.action_space = action_space
-        EzPickle.__init__(self)
+        EzPickle.__init__(self, model_path=model_path, render_mode=render_mode)
         
         # Cache objects
         self._body_idx = {}
