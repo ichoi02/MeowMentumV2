@@ -57,7 +57,7 @@ LOOP_HZ = 50
 CONTROL_DURATION = 0.74   # sim episode: 37 steps x (1/50 s) = 0.74 s
 
 # --- Policy / sim-matching parameters (MUST match cat_env/cat_env.py + model/cat.xml) ---
-N_FRAMES = 4              # stacked student frames  (distillation.N_FRAMES)
+N_FRAMES = 2              # stacked student frames  (distillation.N_FRAMES)
 FILTER_ALPHA = 0.3        # action low-pass gain    (cat_env.filter_alpha)
 GRAV_DIM = 3
 # Joint target ranges (rad), from model/cat.xml jnt_range:
@@ -69,11 +69,14 @@ TAIL_RANGE = 1.9199       # tail          (+/-110 deg)
 SERIAL_DRAIN_MAX_LINES = 32
 
 def stack_frames(frames):
-    """Group N student frames (oldest -> newest) by feature type:
-    [grav_0..grav_{N-1} (3 each), joints_0..joints_{N-1} (4 each)].
+    """Newest frame plus successive backward differences, grouped by feature type.
+    For N=2: [grav(3), d_grav(3), joints(4), d_joints(4)].
     MUST match distillation.stack_frames exactly."""
-    gravs = [f[:GRAV_DIM] for f in frames]
-    joints = [f[GRAV_DIM:] for f in frames]
+    seq = list(frames)                                    # oldest -> newest
+    deltas = [seq[i] - seq[i - 1] for i in range(len(seq) - 1, 0, -1)]
+    parts = [seq[-1]] + deltas
+    gravs = [p[:GRAV_DIM] for p in parts]
+    joints = [p[GRAV_DIM:] for p in parts]
     return np.concatenate(gravs + joints)
 
 # Teleplot
@@ -245,8 +248,17 @@ class TeensyInterface:
                     pass
 
     def set_motors(self, m1, m2):
-        """Sends target motor angles (2dp) to Teensy: 'm1,m2\\n'."""
-        cmd = f"{m1:.2f},{m2:.2f}\n"
+        """Sends target motor angles (4dp, rad) to Teensy: 'm1,m2\\n'.
+
+        4 decimals, not 2: at 2dp the target was quantized to 0.01 rad, which is
+        coarser than the encoder can resolve on pitch/tail (0.0038 rad) and a third
+        of the 0.03 rad deadband -- the link was throwing away resolution the rest
+        of the chain has, and sim models no such quantization. At 4dp (1e-4 rad) the
+        target is finer than every other quantizer in the chain, so it stops being
+        the limiting one. Costs 4 bytes/line on a USB-CDC link that ignores the
+        nominal baud rate anyway.
+        """
+        cmd = f"{m1:.4f},{m2:.4f}\n"
         try:
             self.ser.write(cmd.encode('utf-8'))
         except (OSError, serial.SerialException) as e:

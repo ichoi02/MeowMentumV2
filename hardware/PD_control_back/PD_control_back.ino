@@ -34,14 +34,17 @@ bool ENCODER2_REVERSED = true;
 // 3. CONTROL SETTINGS
 // ==========================================
 // PD gains = sim pd_nominal * 1024  (sim normalized torque [-1,1] -> PWM [0,1023]).
-// Back M1 = tail: sim (kp=30.0, kd=1.0);  Back M2 = rot2 (roll): sim (kp=5.0, kd=0.4).
-double Kp1 = 30720.0;
+// Back M1 = tail: sim (kp=20.0, kd=1.0);  Back M2 = rot2 (roll): sim (kp=4.0, kd=0.4).
+// Tuned by tools/tune_pd_gains.py -- see cat_env.py::pd_nominal for the method.
+double Kp1 = 20480.0;
 double Kd1 = 1024.0;
-double Kp2 = 5120.0;
+double Kp2 = 4096.0;
 double Kd2 = 409.6;
 
 // If the error is within this many ticks, motor stops
 float deadband = 0.03;
+// Velocity low-pass gain; MUST match cat_env/env_util.py::VEL_FILTER_ALPHA.
+const double VEL_ALPHA = 0.1;
 const int minPWM = 100;
 const int PWM_MAX = 1023;
 
@@ -56,8 +59,12 @@ static char s_telemBuf[128];
 // ==========================================
 float targetPos1 = 0;
 float targetPos2 = 0;
-float lastErr1 = 0;
-float lastErr2 = 0;
+// Previous MEASURED position, for derivative-on-measurement (see runController).
+float lastPos1 = 0;
+float lastPos2 = 0;
+// One-pole low-pass state for the velocity estimate (see runController).
+float velFilt1 = 0;
+float velFilt2 = 0;
 
 uint32_t lastControlMicros = 0;
 uint32_t lastPrintMillis = 0;
@@ -141,13 +148,33 @@ void runController(double dt) {
   float currentPos1 = readEncoder1();
   float currentPos2 = readEncoder2();
 
+  // Derivative on MEASUREMENT, not on error. d(err)/dt = d(target)/dt - velocity,
+  // so differentiating the error makes the target's own jumps enter the D term:
+  // the host updates targets at 50 Hz while this loop runs at 1 kHz, so a new
+  // target produced a one-sample derivative spike of Kd*dTarget/dt -- measured at
+  // 336x (roll) to 1134x (tail) PWM_MAX, i.e. one full millisecond of saturated
+  // torque at every single update. That is textbook derivative kick, it is not in
+  // the simulator the policy was trained against, and it fires ~37 times per drop.
+  // -(pos - lastPos)/dt is the same D term with the setpoint removed: pure -velocity,
+  // which is exactly what cat_env's PDController computes.
+  //
+  // The raw difference is then one-pole low-passed. This is not optional: the
+  // encoder is 48 CPR at the motor shaft, which after the gearbox is 13.5 mrad
+  // (roll) / 3.8 mrad (pitch, tail) per tick at the joint. A single tick landing in
+  // one 1 ms sample therefore reads as a 13.5 rad/s velocity, and Kd times that
+  // saturates the command on quantization alone. VEL_ALPHA must match
+  // cat_env/env_util.py::VEL_FILTER_ALPHA so sim and hardware carry the same lag.
+  double velRaw1 = (currentPos1 - lastPos1) / dt;
+  double velRaw2 = (currentPos2 - lastPos2) / dt;
+  velFilt1 += VEL_ALPHA * (velRaw1 - velFilt1);
+  velFilt2 += VEL_ALPHA * (velRaw2 - velFilt2);
+
   // ----- Motor 1 -----
   float err1 = targetPos1 - currentPos1;
   if (abs(err1) <= deadband) {
     stopMotor1();
   } else {
-    double deriv1 = (err1 - lastErr1) / dt;
-    double cmd1 = (Kp1 * err1) + (Kd1 * deriv1);
+    double cmd1 = (Kp1 * err1) - (Kd1 * velFilt1);
     if (MOTOR1_REVERSED) cmd1 = -cmd1;
     driveMotor1(cmd1);
   }
@@ -157,14 +184,15 @@ void runController(double dt) {
   if (abs(err2) <= deadband) {
     stopMotor2();
   } else {
-    double deriv2 = (err2 - lastErr2) / dt;
-    double cmd2 = (Kp2 * err2) + (Kd2 * deriv2);
+    double cmd2 = (Kp2 * err2) - (Kd2 * velFilt2);
     if (MOTOR2_REVERSED) cmd2 = -cmd2;
     driveMotor2(cmd2);
   }
 
-  lastErr1 = err1;
-  lastErr2 = err2;
+  // Updated every cycle, including inside the deadband: a stale lastPos would make
+  // the next moving cycle differentiate across the whole idle interval.
+  lastPos1 = currentPos1;
+  lastPos2 = currentPos2;
 }
 
 // ==========================================

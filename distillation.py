@@ -39,22 +39,54 @@ FRAME_DIM = GRAV_DIM + JOINT_DIM        # single-timestep student features (7)
 N_FRAMES = 2                            # number of stacked timesteps of history
 STUDENT_OBS_DIM = N_FRAMES * FRAME_DIM  # stacked history (14)
 
-def get_noisy_student_frame(full_obs, grav_noise_std=0.02, joint_noise_std=0.02):
+def sample_sensor_bias(grav_bias_std=0.035, joint_bias_std=0.02):
+    """Constant per-drop sensor offsets, drawn once per episode.
+
+    Real sensor error is dominated by fixed offsets, not per-frame noise: the IMU
+    is bolted on with a few degrees of misalignment, and the encoders are zeroed
+    with the robot not exactly at its nominal pose. Both hold for a whole drop, so
+    zero-mean per-frame noise does not cover them -- the network can average that
+    away, but it cannot average away a bias that shifts every frame identically.
+    """
+    return {
+        "grav": np.random.normal(0.0, grav_bias_std, GRAV_DIM),    # rotvec, rad
+        "joint": np.random.normal(0.0, joint_bias_std, JOINT_DIM),
+    }
+
+def get_noisy_student_frame(full_obs, bias, grav_noise_std=0.02, joint_noise_std=0.02):
     """One timestep of what the student is allowed to see: [front_proj_grav(3), joint_angles(4)]."""
     front_grav = full_obs[FRONT_GRAV_SLICE].copy()
     joint_angles = full_obs[JOINT_ANGLE_SLICE].copy()
 
-    # IMU tilt/orientation error: perturb the gravity direction by a small random rotation.
-    noisy_grav = R.from_rotvec(np.random.normal(0.0, grav_noise_std, 3)).apply(front_grav)
-    noisy_joints = util.add_gaussian_noise(joint_angles, joint_noise_std)
+    # IMU error: a constant mounting misalignment plus per-frame tilt noise, both
+    # applied as a rotation of the measured gravity direction.
+    grav_rotvec = bias["grav"] + np.random.normal(0.0, grav_noise_std, GRAV_DIM)
+    noisy_grav = R.from_rotvec(grav_rotvec).apply(front_grav)
+
+    # Encoder error: a constant zeroing offset plus per-frame noise.
+    noisy_joints = util.add_gaussian_noise(joint_angles + bias["joint"], joint_noise_std)
 
     return np.concatenate([noisy_grav, noisy_joints])
 
 def stack_frames(frames):
-    """Stack N student frames (oldest -> newest), grouped by feature type:
-    [grav_0..grav_{N-1} (3 each), joints_0..joints_{N-1} (4 each)]."""
-    gravs = [f[:GRAV_DIM] for f in frames]
-    joints = [f[GRAV_DIM:] for f in frames]
+    """Newest frame plus successive backward DIFFERENCES, grouped by feature type.
+
+    With the default 2 frames the layout is [current, current - previous] rather
+    than [previous, current]: the same 14 numbers and the same information, but the
+    velocity-like part is handed over directly instead of leaving the network to
+    subtract two nearly-equal inputs itself. The two raw frames differ by ~1 part in
+    100 over a 20 ms step, so their difference is a small signal riding on a large
+    common-mode term -- exactly the thing a first layer resolves poorly and that
+    per-frame sensor noise swamps.
+
+    Layout for N=2: [grav(3), d_grav(3), joints(4), d_joints(4)].
+    MUST match hardware/controller.py::stack_frames exactly.
+    """
+    seq = list(frames)                                    # oldest -> newest
+    deltas = [seq[i] - seq[i - 1] for i in range(len(seq) - 1, 0, -1)]
+    parts = [seq[-1]] + deltas
+    gravs = [p[:GRAV_DIM] for p in parts]
+    joints = [p[GRAV_DIM:] for p in parts]
     return np.concatenate(gravs + joints)
 
 # ---- 1. Define the Student Policy ----
@@ -74,27 +106,29 @@ class StudentPolicy(nn.Module):
         return self.net(x)
 
 # ---- 2. Data Collection Logic ----
-def collect_data(env, student_policy, expert_policy, num_steps, is_student_acting=False, max_delay=2):
+def collect_data(env, student_policy, expert_policy, num_steps, is_student_acting=False,
+                 max_delay=2, n_frames=N_FRAMES):
     """
     Rolls out a policy. The expert uses the FULL CURRENT observation.
-    The student uses the DELAYED NOISY observation (N_FRAMES stacked timesteps).
+    The student uses the DELAYED NOISY observation (n_frames stacked timesteps).
     """
     student_states = []
     expert_actions = []
 
     full_obs, _ = env.reset()
 
-    # Initialize random delay and observation buffer for the first episode
+    # Initialize random delay, sensor bias and observation buffer for the first episode
     obs_delay = np.random.randint(0, max_delay + 1)
+    bias = sample_sensor_bias()
     obs_buffer = []
 
     for _ in range(num_steps):
         # 1. Extract what the student is allowed to see at this timestep
-        obs_buffer.append(get_noisy_student_frame(full_obs))
+        obs_buffer.append(get_noisy_student_frame(full_obs, bias))
 
-        # 2. Retrieve the delayed frame plus the (N_FRAMES-1) preceding it (clamped at 0)
+        # 2. Retrieve the delayed frame plus the (n_frames-1) preceding it (clamped at 0)
         curr_idx = max(len(obs_buffer) - 1 - obs_delay, 0)
-        frame_idxs = [max(curr_idx - k, 0) for k in reversed(range(N_FRAMES))]
+        frame_idxs = [max(curr_idx - k, 0) for k in reversed(range(n_frames))]
         delayed_student_obs = stack_frames([obs_buffer[i] for i in frame_idxs])
         student_states.append(delayed_student_obs)
 
@@ -117,17 +151,18 @@ def collect_data(env, student_policy, expert_policy, num_steps, is_student_actin
         if terminated or truncated:
             full_obs, _ = env.reset()
             obs_delay = np.random.randint(0, max_delay + 1)
+            bias = sample_sensor_bias()
             obs_buffer = []
 
     return np.array(student_states), np.array(expert_actions)
 
 # ---- 3. Main DAgger Loop ----
-def run_dagger(variant="tail"):
+def run_dagger(variant="tail", n_frames=N_FRAMES):
     cfg = VARIANTS[variant]
     env = gym.make(cfg["env_id"])
 
-    # N_FRAMES x (3 front projected gravity + 4 joint angles) total dimensions
-    student_obs_dim = STUDENT_OBS_DIM
+    # n_frames x (3 front projected gravity + 4 joint angles) total dimensions
+    student_obs_dim = n_frames * FRAME_DIM
     act_dim = env.action_space.shape[0]
 
     print("Loading privileged expert policy...")
@@ -145,7 +180,8 @@ def run_dagger(variant="tail"):
 
     print("Iteration 0: Collecting initial expert data...")
     # Expert drives, Expert labels
-    D_states, D_actions = collect_data(env, student, expert, steps_per_iter, is_student_acting=False)
+    D_states, D_actions = collect_data(env, student, expert, steps_per_iter,
+                                       is_student_acting=False, n_frames=n_frames)
 
     for i in range(1, iterations + 1):
         print(f"\n--- DAgger Iteration {i}/{iterations} ---")
@@ -169,7 +205,8 @@ def run_dagger(variant="tail"):
                 print(f"  Epoch {epoch+1}/{epochs_per_iter}, Loss: {total_loss/len(dataloader):.4f}")
 
         # Student drives (based on partial obs), Expert corrects/labels (based on full obs)
-        new_states, new_expert_actions = collect_data(env, student, expert, steps_per_iter, is_student_acting=True)
+        new_states, new_expert_actions = collect_data(env, student, expert, steps_per_iter,
+                                                      is_student_acting=True, n_frames=n_frames)
 
         D_states = np.concatenate([D_states, new_states], axis=0)
         D_actions = np.concatenate([D_actions, new_expert_actions], axis=0)
@@ -179,12 +216,19 @@ def run_dagger(variant="tail"):
             D_states = D_states[-max_buffer_size:]
             D_actions = D_actions[-max_buffer_size:]
 
-    torch.save(student.state_dict(), f"student_policy{cfg['suffix']}_{time.strftime('%Y%m%d-%H%M%S')}.pth")
+    # Frame count is tagged into the filename only when it differs from the
+    # default, so the standard artifact names stay exactly as the pipeline expects.
+    frame_tag = "" if n_frames == N_FRAMES else f"_f{n_frames}"
+    out = f"student_policy{cfg['suffix']}{frame_tag}_{time.strftime('%Y%m%d-%H%M%S')}.pth"
+    torch.save(student.state_dict(), out)
+    print(f"Student saved to {out}")
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--variant", choices=list(VARIANTS), default="tail",
                          help="ablation condition to distill (default: tail)")
+    parser.add_argument("--frames", type=int, default=N_FRAMES,
+                         help=f"stacked student frames (default: {N_FRAMES})")
     args = parser.parse_args()
-    run_dagger(args.variant)
+    run_dagger(args.variant, args.frames)

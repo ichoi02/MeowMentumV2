@@ -46,6 +46,9 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
 | `hardware/reconstruct_viz_view.py` | **[desktop]** replay the saved `.npz` in the MuJoCo viewer |
 | `hardware/{discover_teensy,flash_pd_control_teensy}.*` | Teensy discovery + build/flash tooling |
 | `hardware/{postmortem,plot_telemetry_motor_angles}.py` | Telemetry plotting |
+| `docs/evaluate.py` | Closed-loop success rate + penalty-magnitude diagnostics (`--stats`) |
+| `docs/sweep.py` | Parallel reward-weight sweep driver (train → evaluate → JSONL) |
+| `docs/REWARD_TUNING.md` | How the five penalty weights were tuned, and the sweep data |
 
 ## Simulation — `Cat-v0`
 
@@ -62,12 +65,26 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
   (`env_util.PDController`, per-joint gains) tracks the targets each 1 ms substep — the
   sim model of the Teensy inner loop.
 - **Reward** (dense, no time ramp — the discount drives "upright as soon as possible"):
-  `r = w_pos·(½(up_f+up_r) + up_f·up_r) + w_bonus·1[both upright] − w_sm·‖Δa‖² − w_en·‖τ‖²`,
-  with per-body uprightness `up = ½(cos(tilt)+1)`.
-- **Domain randomization** (per reset): mass, damping, armature, friction, COM, inertia,
-  action delay, and a uniformly random initial attitude (`init_ang_vel_max` sets an
-  optional initial tumble). PD gains are **not** randomized (the sim-tuned gains are
-  flashed to the hardware inner loop).
+  `r = w_pos·(½(up_f+up_r) + up_f·up_r) + w_bonus·1[both upright] − Σ penalties`,
+  with per-body uprightness `up = ½(cos(tilt)+1)`. Five penalties, all hardware-facing:
+
+  | term | penalizes | why |
+  |---|---|---|
+  | `w_sm·mean(Δa²)` | action rate | jitter the real actuator cannot track |
+  | `w_en·mean(τ²)` | applied torque | energy |
+  | `w_av·mean(ω²)` | body angular velocity | landing upright but still tumbling |
+  | `w_jv·mean(q̇²)` | joint velocity | motion that does not buy reorientation |
+  | `w_time·Σ_{i<j}\|Δaᵢ\|\|Δaⱼ\|` | joints moving *simultaneously* | a step-by-step maneuver stays in states the sim models well |
+
+  Each `info` dict also reports the **unweighted** magnitude `m_*` beside `r_*` — that,
+  not the weighted term, is what reward tuning reads. See `docs/REWARD_TUNING.md`;
+  weights are overridable as `CAT_W_{SM,EN,AV,JV,TIME}` without a code edit.
+- **Domain randomization** (per reset): mass, COM, inertia, action delay, initial joint
+  angles (±0.2 rad), and a uniformly random initial attitude (`init_ang_vel_max` sets an
+  optional initial tumble). Damping, armature, friction, `ctrlrange` and the PD gains are
+  drawn **once per motor group** — `rot1`/`rot2` are the same 9.68:1 roll motor and
+  `pitch`/`tail` the same 34.014:1 motor, so identical hardware gets identical
+  multipliers rather than independent draws the real robot could never exhibit.
 
 ## Training & distillation
 
