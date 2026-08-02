@@ -23,6 +23,7 @@ from scipy.spatial.transform import Rotation as R
 from stable_baselines3 import SAC
 
 import cat_env  # noqa: F401  (registers Cat-v0 / CatNoTail-v0)
+from cat_env.cat_env import BASE_OBS_DIM
 from distillation import (
     StudentPolicy, stack_frames, sample_sensor_bias, get_noisy_student_frame,
     FRAME_DIM, JOINT_DIM, GRAV_DIM, N_FRAMES, FRONT_GRAV_SLICE, JOINT_ANGLE_SLICE,
@@ -50,16 +51,26 @@ def clean_frame(full_obs):
 def evaluate(variant="tail", agent="student", n_frames=N_FRAMES, episodes=200,
              noisy=True, policy_path=None, seed=0):
     cfg = VARIANTS[variant]
-    env = gym.make(cfg["env_id"])
+
+    # The teacher is loaded BEFORE the env so the env can be built at whatever
+    # width that checkpoint expects. Teachers trained before the privileged DR
+    # block are 25-dim and would otherwise fail against the 73-dim env; the
+    # student never sees the block either way, so it always gets the full env.
+    policy = None
+    if agent == "teacher":
+        policy = SAC.load(policy_path or f"cat_controller{cfg['suffix']}")
+        privileged = policy.observation_space.shape[0] > BASE_OBS_DIM
+    else:
+        privileged = True
+
+    env = gym.make(cfg["env_id"], privileged=privileged)
     u = env.unwrapped
 
     # The env's domain randomization draws from the global numpy stream, so
     # seeding it here makes two configs see the same sequence of drops.
     np.random.seed(seed)
 
-    if agent == "teacher":
-        policy = SAC.load(policy_path or f"cat_controller{cfg['suffix']}")
-    else:
+    if agent != "teacher":
         path = policy_path or f"student_policy{cfg['suffix']}.pth"
         policy = StudentPolicy(n_frames * FRAME_DIM, env.action_space.shape[0])
         policy.load_state_dict(torch.load(path, map_location="cpu"))

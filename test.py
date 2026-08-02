@@ -6,6 +6,7 @@ import time
 import mujoco
 import mujoco.viewer
 from collections import deque
+from scipy.spatial.transform import Rotation as R
 import cat_env
 from distillation import (
     StudentPolicy, stack_frames, STUDENT_OBS_DIM, N_FRAMES,
@@ -17,7 +18,30 @@ def student_frame(full_obs):
     """Clean (noise-free) single student frame: [front_proj_grav(3), joint_angles(4)]."""
     return np.concatenate([full_obs[FRONT_GRAV_SLICE], full_obs[JOINT_ANGLE_SLICE]])
 
-def visualize(variant="tail", agent="student"):
+def force_release(env, roll_deg=None, still=False):
+    """Re-release the robot at a fixed roll instead of the random attitude.
+
+    reset_model() samples a uniform SO(3) attitude, so every drop looks different.
+    This overwrites just the root orientation (and optionally the initial tumble)
+    after the reset, leaving the domain-randomization draw and the randomized joint
+    angles alone -- the point is to watch the SAME maneuver from a repeatable
+    release, not to remove the rest of the randomization.
+
+    Returns the recomputed observation, which the caller must use: the one reset()
+    handed back describes the pre-override state.
+    """
+    u = env.unwrapped
+    qpos, qvel = u.data.qpos.copy(), u.data.qvel.copy()
+    if roll_deg is not None:
+        # Roll about the world x-axis. MuJoCo stores the free joint as wxyz.
+        x, y, z, w = R.from_euler("x", roll_deg, degrees=True).as_quat()
+        qpos[3:7] = [w, x, y, z]
+    if still:
+        qvel[3:6] = 0.0   # drop with zero angular momentum, not already tumbling
+    u.set_state(qpos, qvel)
+    return u._get_obs()
+
+def visualize(variant="tail", agent="student", roll_deg=None, still=False):
     cfg = VARIANTS[variant]
     env = gym.make(cfg["env_id"])
 
@@ -33,6 +57,8 @@ def visualize(variant="tail", agent="student"):
         student.eval()
 
     obs, _ = env.reset()
+    if roll_deg is not None or still:
+        obs = force_release(env, roll_deg, still)
     frame_hist = deque([student_frame(obs)] * N_FRAMES, maxlen=N_FRAMES)  # oldest -> newest
 
     mj_model = env.unwrapped.model
@@ -68,6 +94,8 @@ def visualize(variant="tail", agent="student"):
 
                 if terminated or truncated:
                     obs, _ = env.reset()
+                    if roll_deg is not None or still:
+                        obs = force_release(env, roll_deg, still)
                     frame_hist = deque([student_frame(obs)] * N_FRAMES, maxlen=N_FRAMES)
                 
                 viewer.sync()
@@ -88,5 +116,10 @@ if __name__ == "__main__":
                          help="ablation condition to view (default: tail)")
     parser.add_argument("--agent", choices=["student", "teacher"], default="student",
                          help="policy to view (default: student)")
+    parser.add_argument("--roll", type=float, default=None, metavar="DEG",
+                         help="release at a fixed roll about world x instead of a "
+                              "random attitude, e.g. 180 (upside-down) or 90 (on its side)")
+    parser.add_argument("--still", action="store_true",
+                         help="release with zero angular velocity (no initial tumble)")
     args = parser.parse_args()
-    visualize(args.variant, args.agent)
+    visualize(args.variant, args.agent, args.roll, args.still)

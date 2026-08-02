@@ -42,6 +42,10 @@ def run_job(job, args, log_dir):
             "--out", model,
             "--run-name", name,
         ]
+        # Control arm: train on the pre-DR 25-dim observation. evaluate.py reads
+        # the width back off the checkpoint, so the eval below needs no flag.
+        if not job.get("privileged", True):
+            train_cmd.append("--no-privileged")
         log.write(f"$ {' '.join(train_cmd)}\n")
         log.flush()
         p = subprocess.run(train_cmd, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)

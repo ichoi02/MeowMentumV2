@@ -45,6 +45,7 @@ import csv
 import threading
 from collections import deque
 import cat_env.env_util as util
+from variants import VARIANTS
 import socket
 
 # --- CONFIGURATION ---
@@ -280,6 +281,25 @@ class TeensyInterface:
         aligned_wxyz = r_global.as_quat(scalar_first=True)
         return aligned_wxyz.squeeze(0)
 
+def find_onnx(variant):
+    """Locate this variant's exported student policy.
+
+    Checked in order: the working directory (the historical behavior -- a Pi deploy
+    that drops the .onnx next to wherever it launches keeps working), then beside
+    this file, then the repo root where onnx_conversion.py writes it. Raising with
+    the full candidate list beats an onnxruntime error naming only the first path.
+    """
+    name = f"cat_controller{VARIANTS[variant]['suffix']}.onnx"
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [name, os.path.join(here, name), os.path.join(here, os.pardir, name)]
+    for c in candidates:
+        if os.path.isfile(c):
+            return os.path.abspath(c)
+    raise FileNotFoundError(
+        f"{name} not found. Looked in: "
+        + ", ".join(os.path.abspath(c) for c in candidates)
+        + f"\nExport it with:  python onnx_conversion.py --variant {variant}")
+
 def get_port_by_sn(serial_number):
     for port in serial.tools.list_ports.comports():
         if port.serial_number == serial_number:
@@ -308,6 +328,12 @@ def main():
     parser.add_argument(
         '--motoroff',
         action='store_true'
+    )
+    parser.add_argument(
+        '--variant',
+        choices=list(VARIANTS),
+        default='tail',
+        help="which exported policy to fly: cat_controller<suffix>.onnx (default: tail)"
     )
     args = parser.parse_args()
 
@@ -360,16 +386,26 @@ def main():
     
     input_name = None
     if not args.debug:
-        print("Loading ONNX Model...")
+        onnx_path = find_onnx(args.variant)
+        print(f"Loading ONNX Model: {onnx_path}")
         import onnxruntime as ort
         try:
             ort.set_default_logger_severity(3)
         except (AttributeError, TypeError):
             pass # FIXED: Changed 'parse_args' to 'pass'
-        
-        ort_session = ort.InferenceSession("cat_controller.onnx")
+
+        ort_session = ort.InferenceSession(onnx_path)
         # Fetch the exact input name defined during your PyTorch export
-        input_name = ort_session.get_inputs()[0].name 
+        input_name = ort_session.get_inputs()[0].name
+
+        # Fail loudly here rather than on the first inference mid-drop: a policy
+        # exported with a different N_FRAMES has a different input width.
+        onnx_dim = ort_session.get_inputs()[0].shape[-1]
+        expected = N_FRAMES * (GRAV_DIM + 4)
+        if onnx_dim != expected:
+            raise ValueError(
+                f"{os.path.basename(onnx_path)} expects {onnx_dim}-dim input but this "
+                f"controller builds {expected} (N_FRAMES={N_FRAMES}). Re-export or fix N_FRAMES.")
 
     if not args.motoroff:
         front.start_all_motors()
@@ -442,7 +478,7 @@ def main():
                 else:
                     frame_hist.append(frame)
 
-                obs = stack_frames(list(frame_hist))            # 28-dim
+                obs = stack_frames(list(frame_hist))            # N_FRAMES x 7 = 14-dim
                 obs_tensor = np.array(obs, dtype=np.float32).reshape(1, -1)
 
                 # Run ONNX inference -> normalized action in [-1, 1].

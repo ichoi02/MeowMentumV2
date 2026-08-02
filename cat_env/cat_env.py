@@ -18,48 +18,90 @@ w_pos = _w("POS", 1.0)      # uprightness reward weight
 w_bonus = _w("BONUS", 1.0)  # bonus when BOTH bodies are upright (up_f, up_r > up_thresh)
 up_thresh = 0.95  # per-body uprightness threshold for the success bonus (~26 deg tilt)
 
-# Penalty terms. Every one of these trades directly against w_pos: set too high, a
-# variant that cannot *reliably* right itself scores better holding still than
-# trying, and training collapses to a passive policy instead of a bad-but-trying
-# one. At w_sm = 2.0 the no-tail variant did exactly that (mean |action| 0.08,
-# 90 deg final tilt = no better than doing nothing).
+# Penalty terms, PER VARIANT. Every one trades directly against w_pos: set too
+# high, a variant that cannot *reliably* right itself scores better holding still
+# than trying, and training collapses to a passive policy instead of a
+# bad-but-trying one. The no-tail variant does exactly that at 36% of task reward
+# (6.8% success, 86 deg final tilt = no better than doing nothing).
 #
-# These were tuned from all-zero by raising one term at a time until success
-# dropped, then combining -- see docs/REWARD_TUNING.md. Two things that sweep
-# settled and that any future edit should respect:
+# Tuned from all-zero by sweeping each term alone over a 4-point grid and then
+# combining -- 77 training runs, both variants, docs/REWARD_TUNING.md. Three
+# things that sweep settled and that any future edit should respect:
 #
-#   1. What binds is the TOTAL penalty budget, not any single weight. Each term
-#      below is individually mild (6-18% of the ~1.7/step task reward), because
-#      five terms at their individual knees sum to 142% and collapse the policy to
-#      passivity (9.4% success). Raising one term means lowering another.
-#   2. The no-tail variant tips into that collapse at a LOWER budget than the
-#      tailed one -- it scored 6.2% at exactly these weights -- so it runs at a
-#      fraction of them, applied by variant below.
-w_sm = _w("SM", 0.43)        # action rate (jitter)
-w_en = _w("EN", 1.29)        # energy (applied torque)
-w_av = _w("AV", 0.0067)      # body angular velocity -- unstable/spinning pose
-w_jv = _w("JV", 0.0028)      # joint velocity -- unnecessary joint motion
-w_time = _w("TIME", 0.33)    # simultaneous multi-joint motion -- see _get_reward
-
-# Every penalty is scaled by this for the no-tail model (see point 2 above). It
-# multiplies all five at once because the budget is what binds, not any one term.
-# Swept separately: no-tail success runs 6.2 / 17.4 / 28.2 / 34.0 / 29.6% at scale
-# 1.0 / 0.70 / 0.50 / 0.25 / 0.0, so a quarter of the tailed budget is the peak --
-# and it does beat penalty-free, just by much less headroom than the tailed robot.
-notail_penalty_scale = _w("NOTAIL_SCALE", 0.25)
+#   1. What binds is the TOTAL penalty budget, not any single weight. Grid
+#      positions are sized in reward units (fraction of that variant's baseline
+#      task reward), because a raw weight means nothing on its own: m_av ~ 18 and
+#      m_sm ~ 0.25, so one weight is crushing where the other is negligible.
+#   2. The two variants need DIFFERENT weights, not a shared shape scaled down.
+#      The ratios that came out of the sweep are sm 1.03, en 0.69, av 0.00,
+#      jv 0.78, time 0.32 -- no single scale factor produces that, which is why
+#      the old notail_penalty_scale is gone.
+#   3. w_av is the weak term. Swept alone it raises the magnitudes it does NOT
+#      price (at 50% of budget m_sm goes UP 29%): contact is disabled, angular
+#      momentum is conserved, and the policy cannot shed rotation -- it only
+#      thrashes trying. Tail keeps it at the cheapest useful setting; no-tail
+#      drops it entirely.
+#
+# Budgets: tail 54% of task reward (the ceiling -- 60% and above lands at 41%),
+# no-tail 24% (its ceiling is between 24% and 36%, where success halves).
+PENALTY_WEIGHTS = {
+    #          action rate  torque     body omega  joint vel   simultaneity
+    "tail":   {"sm": 0.399, "en": 0.646, "av": 0.00547, "jv": 0.000815, "time": 0.848},
+    "notail": {"sm": 0.412, "en": 0.447, "av": 0.0,     "jv": 0.000633, "time": 0.271},
+}
 
 init_ang_vel_max = 0.5  # rad/s, per-axis range for random initial tumble
 init_joint_pos_max = 0.2  # rad, per-joint range for random initial joint angles
 filter_alpha = 0.3  # action low-pass gain (1.0 = no filter, smaller = smoother)
 # --------------------------
 
+# ---- privileged (teacher-only) domain-randomization block ----
+# The teacher is a privileged policy: it may see things no sensor measures. The
+# per-episode DR draw is exactly that -- the student cannot read its own rotor
+# inertia, but it CAN infer it from how the joints responded over the last few
+# frames, which is what distillation forces it to learn. Handing the teacher the
+# true draw means it no longer has to infer the plant from the same 25 numbers it
+# uses to act, so its labels are the actions of a policy that *knows* the robot.
+#
+# Appended at the END of the observation so every existing index is unchanged --
+# distillation.py's student slices (front gravity 0:3, joint angles 12:16) and
+# the hardware obs layout keep working untouched.
+#
+# Layout (all bodies below exclude the world body, index 0; 5 real bodies):
+#   [ 0: 5]  body mass multipliers
+#   [ 5:20]  body COM (ipos) offsets, xyz
+#   [20:35]  body inertia multipliers, xyz
+#   [35:47]  per motor GROUP (2) x [damping, armature, friction, ctrlrange, kp, kd]
+#   [   47]  action delay
+# Both model variants have the same 6 bodies / 4 joints / 2 motor groups, so this
+# width is identical for tail and no-tail.
+#
+# Every entry is normalized to put nominal at exactly 0 and the sampled range at
+# about [-1, 1]. Raw multipliers would hand SAC a block of inputs sitting at 1.0
+# with 1e-3-scale variation (armature is 1.5e-4 Nm.s^2 nominal), which the first
+# layer resolves about as poorly as it resolves the frame differences the student
+# stacker exists to avoid.
+DR_DIM = 48
+BASE_OBS_DIM = 25
+
+
+def _dr_scale(x, half_range, center=1.0):
+    """Multiplier (or offset) -> ~[-1, 1], nominal at 0."""
+    return (np.asarray(x) - center) / half_range
+
 class CatEnv(MujocoEnv, EzPickle):
     metadata = {"render_modes": ["human", "rgb_array", "depth_array"], "render_fps": 50}
 
-    def __init__(self, model_path="model/cat.xml", render_mode=None):
+    def __init__(self, model_path="model/cat.xml", render_mode=None, privileged=True):
         model_path = os.path.abspath(model_path)
 
-        observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(25,), dtype=np.float32)
+        # privileged=False reproduces the old 25-dim observation, so teachers
+        # trained before the DR block was added still load and evaluate.
+        self.privileged = privileged
+        self._dr_vec = np.zeros(DR_DIM)
+        obs_dim = BASE_OBS_DIM + (DR_DIM if privileged else 0)
+
+        observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
         action_space = spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32)
 
         MujocoEnv.__init__(
@@ -71,7 +113,8 @@ class CatEnv(MujocoEnv, EzPickle):
             render_mode=render_mode
         )
         self.action_space = action_space
-        EzPickle.__init__(self, model_path=model_path, render_mode=render_mode)
+        EzPickle.__init__(self, model_path=model_path, render_mode=render_mode,
+                          privileged=privileged)
         
         # Cache objects
         self._body_idx = {}
@@ -154,16 +197,18 @@ class CatEnv(MujocoEnv, EzPickle):
                                      dt=self.model.opt.timestep)
                    for (kp, kd), name in zip(self.pd_nominal, self.joint_names)]
 
-        # Penalty weights are per-instance so the no-tail model can run the same
-        # reward at a smaller total budget: with less authority it reaches the
-        # passive optimum sooner, and at the tailed weights it collapses outright
-        # (6.2% success, 91 deg tilt -- docs/REWARD_TUNING.md).
-        scale = notail_penalty_scale if "notail" in os.path.basename(model_path) else 1.0
-        self.w_sm = w_sm * scale
-        self.w_en = w_en * scale
-        self.w_av = w_av * scale
-        self.w_jv = w_jv * scale
-        self.w_time = w_time * scale
+        # Penalty weights are per-instance and per-variant: a variant with less
+        # authority reaches the passive optimum at a lower budget, and at the
+        # tailed weights the no-tail robot collapses outright (6.6% success,
+        # 91 deg tilt -- docs/REWARD_TUNING.md). CAT_W_* still overrides, so a
+        # sweep needs no code edit.
+        variant = "notail" if "notail" in os.path.basename(model_path) else "tail"
+        w = PENALTY_WEIGHTS[variant]
+        self.w_sm = _w("SM", w["sm"])
+        self.w_en = _w("EN", w["en"])
+        self.w_av = _w("AV", w["av"])
+        self.w_jv = _w("JV", w["jv"])
+        self.w_time = _w("TIME", w["time"])
 
         self.ctrls = []
 
@@ -260,6 +305,7 @@ class CatEnv(MujocoEnv, EzPickle):
         self.model.dof_frictionloss[:] = self.nominal_frictionloss
         self.model.actuator_ctrlrange[:] = self.nominal_ctrlrange
 
+        dr_motor = []
         for group in self._motor_groups:
             # Damping is a nominal estimate (from motor no-load speed / stall torque),
             # so randomize it wider (+/-30%) than the other params.
@@ -279,6 +325,19 @@ class CatEnv(MujocoEnv, EzPickle):
             # constant is a property of the motor, hence also per-group.
             kp_noise = np.random.uniform(0.8, 1.2)
             kd_noise = np.random.uniform(0.8, 1.2)
+
+            # Armature is the one draw that is log-uniform-ish rather than a narrow
+            # band around 1 (0.4 = 1/2.5), so it is normalized in log space; a linear
+            # scaling would put nominal at -0.6 instead of 0 and squash the whole
+            # lower half of the range into a fifth of the axis.
+            dr_motor.extend([
+                _dr_scale(damping_noise, 0.3),
+                np.log(armature_noise) / np.log(2.5),
+                _dr_scale(friction_noise, 0.3),
+                _dr_scale(ctrlrange_noise, 0.2),
+                _dr_scale(kp_noise, 0.2),
+                _dr_scale(kd_noise, 0.2),
+            ])
 
             for name in group:
                 dof = self._joint_qvel_idx[name]
@@ -307,6 +366,19 @@ class CatEnv(MujocoEnv, EzPickle):
 
         # Action low-pass filter state (starts neutral)
         self.action_filt = np.zeros(self.action_space.shape, dtype=np.float32)
+
+        # Freeze this episode's draw as the privileged block of the observation.
+        # Constant for the whole episode by construction -- the DR is resampled
+        # only here -- so the teacher reads the same 48 numbers every step.
+        self._dr_vec = np.concatenate([
+            _dr_scale(mass_noise[1:], 0.2),
+            (ipos_noise[1:] / 0.04).ravel(),
+            _dr_scale(inertia_noise[1:], 0.2).ravel(),
+            np.array(dr_motor),
+            [self.action_delay - 1.0],  # {0,1,2} steps -> {-1,0,1}
+        ])
+        assert self._dr_vec.shape == (DR_DIM,), \
+            f"DR_DIM={DR_DIM} does not match this model ({self._dr_vec.shape[0]})"
 
         # Set physics params
         mujoco.mj_setConst(self.model, self.data)
@@ -386,6 +458,13 @@ class CatEnv(MujocoEnv, EzPickle):
             joint_qpos, joint_qvel,
             ctrl, step
         ])
+
+        # Privileged tail: this episode's domain-randomization draw. Teacher-only
+        # by construction -- the student's obs is built from slices of the block
+        # above (distillation.py), so nothing downstream of distillation ever sees
+        # it, and it must stay LAST so those slice indices never move.
+        if self.privileged:
+            obs = np.concatenate([obs, self._dr_vec])
         return obs.astype(np.float32)
     
     def _get_reward(self, action):

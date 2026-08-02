@@ -8,6 +8,7 @@ from stable_baselines3 import SAC
 from scipy.spatial.transform import Rotation as R
 import cat_env
 import cat_env.env_util as util
+from cat_env.cat_env import BASE_OBS_DIM
 import time
 from variants import VARIANTS
 
@@ -19,7 +20,7 @@ else:
     device = torch.device("cpu")
 print(f"Using device: {device}")
 
-# Full obs layout (see cat_env/cat_env.py::_get_obs; 25-dim, yaw-invariant):
+# Full obs layout (see cat_env/cat_env.py::_get_obs; 73-dim, yaw-invariant):
 #   [0:3]    front_proj_grav   (front-body gravity direction; front IMU on real robot)
 #   [3:6]    rear_proj_grav
 #   [6:9]    front_gyro
@@ -28,8 +29,12 @@ print(f"Using device: {device}")
 #   [16:20]  joint velocities
 #   [20:24]  ctrl
 #   [24]     step
+#   [25:73]  privileged DR block (this episode's mass/COM/inertia/motor draw)
 # The real robot has only the FRONT IMU + joint encoders, so the student sees
-# front_proj_grav (yaw-invariant, matching the teacher) + joint angles.
+# front_proj_grav (yaw-invariant, matching the teacher) + joint angles. The DR
+# block is teacher-only and deliberately unreachable from the slices below: the
+# student has to recover the plant from how it responded, which is the whole
+# point of distilling a privileged teacher rather than deploying it.
 FRONT_GRAV_SLICE = slice(0, 3)
 JOINT_ANGLE_SLICE = slice(12, 16)
 
@@ -157,16 +162,23 @@ def collect_data(env, student_policy, expert_policy, num_steps, is_student_actin
     return np.array(student_states), np.array(expert_actions)
 
 # ---- 3. Main DAgger Loop ----
-def run_dagger(variant="tail", n_frames=N_FRAMES):
+def run_dagger(variant="tail", n_frames=N_FRAMES, teacher=None, tag=""):
     cfg = VARIANTS[variant]
-    env = gym.make(cfg["env_id"])
+
+    # The teacher is loaded BEFORE the env so the env can be built at whatever
+    # width that checkpoint expects -- 73-dim with the privileged DR block, 25-dim
+    # without it. The student's slices are identical either way (the block is
+    # appended last), so this only affects what the expert is shown.
+    print("Loading privileged expert policy...")
+    expert = SAC.load(teacher or f"cat_controller{cfg['suffix']}")
+    privileged = expert.observation_space.shape[0] > BASE_OBS_DIM
+    env = gym.make(cfg["env_id"], privileged=privileged)
+    print(f"  teacher obs {expert.observation_space.shape[0]}-dim "
+          f"(privileged={privileged})")
 
     # n_frames x (3 front projected gravity + 4 joint angles) total dimensions
     student_obs_dim = n_frames * FRAME_DIM
     act_dim = env.action_space.shape[0]
-
-    print("Loading privileged expert policy...")
-    expert = SAC.load(f"cat_controller{cfg['suffix']}")
 
     # Initialize Student with restricted observation space
     student = StudentPolicy(student_obs_dim, act_dim)
@@ -219,7 +231,7 @@ def run_dagger(variant="tail", n_frames=N_FRAMES):
     # Frame count is tagged into the filename only when it differs from the
     # default, so the standard artifact names stay exactly as the pipeline expects.
     frame_tag = "" if n_frames == N_FRAMES else f"_f{n_frames}"
-    out = f"student_policy{cfg['suffix']}{frame_tag}_{time.strftime('%Y%m%d-%H%M%S')}.pth"
+    out = f"student_policy{cfg['suffix']}{frame_tag}{tag}_{time.strftime('%Y%m%d-%H%M%S')}.pth"
     torch.save(student.state_dict(), out)
     print(f"Student saved to {out}")
 
@@ -230,5 +242,8 @@ if __name__ == "__main__":
                          help="ablation condition to distill (default: tail)")
     parser.add_argument("--frames", type=int, default=N_FRAMES,
                          help=f"stacked student frames (default: {N_FRAMES})")
+    parser.add_argument("--teacher", default=None,
+                         help="explicit teacher .zip (default: cat_controller<suffix>)")
+    parser.add_argument("--tag", default="", help="extra suffix for the output filename")
     args = parser.parse_args()
-    run_dagger(args.variant, args.frames)
+    run_dagger(args.variant, args.frames, args.teacher, args.tag)

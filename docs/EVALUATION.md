@@ -11,44 +11,86 @@
 > Current numbers are in the next section; the analysis of *why* `w_sm` collapses a
 > weak variant remains correct and was reproduced three more times during retuning.
 
-## Current numbers (2026-07-31, retuned reward)
+## Current numbers (2026-08-03, per-variant retuned reward)
 
-500 random drops, seed 0, both bodies under 30° of tilt. Sampling SE ≈2.2 pp;
-training-run-to-run spread is larger, about ±5 pp (see `docs/REWARD_TUNING.md`).
+1000 random drops, held-out eval seed 4242, both bodies under 30° of tilt. Sampling
+SE ≈1.6 pp; training-run-to-run spread is larger — measured seed sd is 1.8–4.4 pp
+(tail) and 0.8–3.5 pp (no-tail), see `docs/REWARD_TUNING.md`.
 
-| Configuration | With tail | No tail | previously |
-|---|---:|---:|---|
-| Teacher (privileged obs) | **62.8%** | **34.0%** | 38.3% / 26.0% |
-| Student, noisy sensors | **47.2%** | **28.8%** | 25.3% / 17.0% |
-| Student, clean sensors | **47.0%** | **27.6%** | 22.0% / 25.0% |
+| Configuration | With tail | No tail |
+|---|---:|---:|
+| Teacher (privileged obs, 73-dim) | **55.2%** | **27.2%** |
+| Student, noisy sensors | **53.5%** | **24.9%** |
+| Student, clean sensors | 55.8% | 24.1% |
+| teacher → student gap (noisy) | −1.7 pp | −2.3 pp |
 
-Median final tilt, students: 27°/28° (tail), 41°/38° (no tail).
-`hardware/e2e_test.py` closed-loop: **45/100 tail** (was 29–30), **32/100 no tail**
-(was 12–25). Both variants pass 5/5 pipeline checks.
+Median final tilt: teacher 23°/20° (tail), 36°/35° (no tail); student 24°/22° and
+40°/38°. Final DAgger loss 0.0494 (tail), 0.0802 (no tail).
 
-The teacher also got substantially calmer, which is the point of the new terms —
-shipped tail teacher vs the same teacher trained with no penalties at all:
+**The tail student is statistically indistinguishable from its teacher** (−1.7 pp
+against ±1.6 pp sampling error; the clean-sensor student is nominally above it). A
+policy seeing 14 numbers from one IMU and four encoders reproduces one that sees 73
+including the true mass, inertia and motor draw.
 
-| | penalty-free | shipped | change |
+The tail teacher also got both better and calmer, which is what the retuned budget
+bought — shipped tail teacher vs the same teacher trained with no penalties at all,
+3 seeds each:
+
+| | penalty-free | shipped (`t_cool`) | change |
 |---|---:|---:|---:|
-| success | 57.8% | 62.8% | +5.0 pp |
-| mean tilt | 27° | 25° | −2° |
-| action rate `m_sm` | 0.237 | 0.089 | **−62%** |
-| joint travel, roll (rad) | 8.2 | 5.9 | **−28%** |
-| final \|omega\| (rad/s) | 4.11 | 2.48 | **−40%** |
-| \|action\| roll/pitch/tail | 0.76/0.66/0.76 | 0.51/0.48/0.67 | — |
+| success | 47.3% ±1.8 | **55.3% ±1.8** | **+8.0 pp** (5.4 SE) |
+| median tilt f/r | 26/26° | 24/21° | −2/−5° |
+| action rate `m_sm` | 0.250 | 0.091 | **−64%** |
+| simultaneity `m_time` | 0.353 | 0.129 | **−63%** |
+| joint travel, roll (rad) | 8.5 | 7.1 | −16% |
+| final \|omega\| (rad/s) | 5.04 | 4.00 | **−21%** |
+| \|action\| roll/pitch/tail | 0.72/0.66/0.76 | 0.58/0.53/0.72 | — |
 
-Success is within the ±5 pp run-to-run noise band (`combo_cool` scored 55.0 / 62.8 /
-50.4% over three seeds against a 57.8% baseline), so the honest claim is **equal
-success at roughly half the motion**, not a success improvement.
+Unlike the previous study, this **is** a success improvement and not just a motion
+reduction: +8.0 pp at 5.4 standard errors over three seeds each.
 
-The tail arm runs the full penalty budget; the no-tail arm runs a quarter of it
-(`notail_penalty_scale`), because it collapses to passivity at the tailed weights.
+The no-tail arm is the opposite: no penalty setting beat its penalty-free baseline
+(30.4%), and the shipped `n_mild` sits 3.8 pp below it — inside noise, bought for
+−36% action rate and −45% simultaneity. See the tuning doc's ceiling-search section.
+
+The two arms now run **different weights** (`cat_env.py::PENALTY_WEIGHTS`), not one
+budget scaled down, because the tuned ratios are `sm` 1.03, `en` 0.69, `av` 0.00,
+`jv` 0.78, `time` 0.32.
 That difference is itself a finding — see the no-tail section of the tuning doc —
 but it means the two arms are no longer reward-identical, so the gap above mixes the
 tail's physical contribution with a reward-budget difference. Re-running the ablation
 cleanly (both arms at the same budget, at whatever budget the weaker one tolerates)
-is the open item.
+is the open item, and the retune made it sharper rather than resolving it: no-tail's
+tolerable budget (24%) is now known to be less than half the tail's (54%).
+
+### Hardware pipeline (2026-08-03, re-run against the retuned students)
+
+`python hardware/e2e_test.py --variant {tail,notail}` — sim stands in for the robot,
+everything downstream of the emulated IMU/encoders is the real `controller.py` code.
+**5/5 checks pass on both variants.**
+
+| check | tail | no tail |
+|---|---|---|
+| dims consistent (controller/distill/onnx = 14) | PASS | PASS |
+| ONNX == PyTorch student | PASS (6.5e-06) | PASS (1.4e-05) |
+| controller obs == sim student obs | PASS (4.4e-07) | PASS (4.6e-07) |
+| controller filter+map == sim executed target | PASS (6.6e-07) | PASS (6.6e-07) |
+| closed-loop righting above tripwire | **61/100** (floor 10) | **28/100** (floor 5) |
+
+Median final tilt f/r: 21/19° tail, 42/38° no-tail. ONNX inference 0.010 ms mean /
+0.015 ms p99 against a 20 ms budget at 50 Hz — four orders of margin.
+
+Tail closed-loop is **61/100**, up from 45/100 pre-retune; no-tail **28/100**, down
+from 32/100 but inside the 12–25/100 historical spread this tripwire was sized
+around. Note this run counts higher than the 1000-drop table above (53.5% tail)
+because N=100 with random attitudes is noisy — it is a breakage tripwire, not a
+performance measurement.
+
+### Not re-measured (2026-08-03)
+
+The initial-ω sensitivity sweep and the student frame-count study **have not been
+re-run** against the retuned policies and should not be cited against the current
+models. The tables above are current.
 
 ---
 

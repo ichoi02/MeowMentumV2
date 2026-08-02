@@ -23,14 +23,14 @@ class TensorboardRewardCallback(BaseCallback):
         return True
 
 def train(variant="tail", total_timesteps=1_000_000, tag="", n_envs=10, seed=None,
-          out=None, gradient_steps=1, run_name=None):
+          out=None, gradient_steps=1, run_name=None, privileged=True):
     cfg = VARIANTS[variant]
 
     env = make_vec_env(
         cfg["env_id"],
         n_envs=n_envs,
         vec_env_cls=SubprocVecEnv,
-        #env_kwargs={"render_mode": "rgb_array"}
+        env_kwargs={"privileged": privileged},
     )
 
     model = SAC(
@@ -83,6 +83,9 @@ if __name__ == "__main__":
     parser.add_argument("--gradient-steps", type=int, default=1,
                          help="gradient steps per vec-env step (default: 1)")
     parser.add_argument("--run-name", default=None, help="TensorBoard run name")
+    parser.add_argument("--no-privileged", action="store_true",
+                        help="train on the 25-dim obs without the DR block "
+                             "(control arm for whether the privileged block helps)")
     args = parser.parse_args()
     train(args.variant, args.steps, args.tag, args.envs, args.seed, args.out,
-          args.gradient_steps, args.run_name)
+          args.gradient_steps, args.run_name, privileged=not args.no_privileged)

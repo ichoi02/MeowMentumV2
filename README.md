@@ -55,10 +55,15 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
 - **Model** (`model/cat.xml`): `front_body` (free root) → `rot1` (spine roll) → `pitch`
   (spine) → `rear_body` (`rot2`, roll) → `tail` (pitch). Contact disabled; 1 ms timestep,
   `frame_skip=20` → 50 Hz control; episode = 37 steps ≈ 0.74 s.
-- **Observation (25-dim, yaw-invariant):** front & rear **projected gravity** (3+3),
+- **Observation (73-dim, yaw-invariant):** front & rear **projected gravity** (3+3),
   front & rear **gyro** (3+3), joint angles (4), joint velocities (4), applied torque
-  (4), normalized step (1). Projected gravity (world −z in body frame) replaces the
-  raw rotation matrix so the policy is invariant to heading.
+  (4), normalized step (1), plus a **privileged DR block** (48) carrying this episode's
+  actual randomization draw — per-body mass / COM / inertia, per-motor-group damping,
+  armature, friction, torque limit and PD gains, and the action delay, each normalized
+  to ~[−1,1] with nominal at 0. Projected gravity (world −z in body frame) replaces the
+  raw rotation matrix so the policy is invariant to heading. The DR block is
+  teacher-only and sits **last**, so the student slices are unaffected; construct the
+  env with `privileged=False` to get the old 25-dim space back for pre-DR checkpoints.
 - **Action (3-dim, in [−1,1]):** `[roll, pitch, tail]`, mapped to joint targets over
   `jnt_range`; the rear roll `rot2` is driven as `−roll` (counter-twist). A first-order
   action low-pass (`filter_alpha=0.3`) suppresses jitter. An inner **PD controller**
@@ -79,6 +84,11 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
   Each `info` dict also reports the **unweighted** magnitude `m_*` beside `r_*` — that,
   not the weighted term, is what reward tuning reads. See `docs/REWARD_TUNING.md`;
   weights are overridable as `CAT_W_{SM,EN,AV,JV,TIME}` without a code edit.
+
+  Weights are **per variant** (`cat_env.py::PENALTY_WEIGHTS`), not a shared set scaled
+  down: the tuned no-tail/tail ratios are `sm` 1.03, `en` 0.69, `av` 0.00, `jv` 0.78,
+  `time` 0.32. Tail runs a 54% budget (of task reward) and *gains* 8 pp of success from
+  it; no-tail runs 24% and collapses to passivity past ~36%.
 - **Domain randomization** (per reset): mass, COM, inertia, action delay, initial joint
   angles (±0.2 rad), and a uniformly random initial attitude (`init_ang_vel_max` sets an
   optional initial tumble). Damping, armature, friction, `ctrlrange` and the PD gains are

@@ -1,0 +1,32 @@
+[
+ {
+  "name": "ctrl25_tcool_s0",
+  "variant": "tail",
+  "seed": 0,
+  "privileged": false,
+  "term": "control_tuned",
+  "weights": {
+   "sm": 0.399,
+   "en": 0.646,
+   "av": 0.00547,
+   "jv": 0.000815,
+   "time": 0.848,
+   "notail_scale": 1.0
+  }
+ },
+ {
+  "name": "ctrl25_tcool_s1",
+  "variant": "tail",
+  "seed": 1,
+  "privileged": false,
+  "term": "control_tuned",
+  "weights": {
+   "sm": 0.399,
+   "en": 0.646,
+   "av": 0.00547,
+   "jv": 0.000815,
+   "time": 0.848,
+   "notail_scale": 1.0
+  }
+ }
+]
