@@ -34,11 +34,12 @@ import torch
 from stable_baselines3 import SAC
 
 import cat_env  # noqa: F401  (registers Cat-v0 / CatNoTail-v0)
+from cat_env.cat_env import BASE_OBS_DIM
 from distillation import (
     StudentPolicy, stack_frames, sample_sensor_bias, get_noisy_student_frame,
     FRAME_DIM, GRAV_DIM, JOINT_DIM, N_FRAMES, FRONT_GRAV_SLICE, JOINT_ANGLE_SLICE,
 )
-from variants import VARIANTS
+from variants import VARIANTS, teacher_path, student_path
 
 # Palette: categorical slots 1-2 (blue, orange), light and dark steps. Target vs
 # actual is an identity pair, so it takes categorical hues; the dashed target adds
@@ -64,8 +65,8 @@ JOINTS = [
 def load_policy(variant, agent, policy_path, n_frames):
     cfg = VARIANTS[variant]
     if agent == "teacher":
-        return SAC.load(policy_path or os.path.join(REPO, f"cat_controller{cfg['suffix']}"))
-    path = policy_path or os.path.join(REPO, f"student_policy{cfg['suffix']}.pth")
+        return SAC.load(policy_path or teacher_path(variant))
+    path = policy_path or student_path(variant)
     net = StudentPolicy(n_frames * FRAME_DIM, 3)
     net.load_state_dict(torch.load(path, map_location="cpu"))
     net.eval()
@@ -175,14 +176,27 @@ def main():
                    help="output directory (default plots/out)")
     args = p.parse_args()
 
-    np.random.seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
     c = THEME["dark" if args.dark else "light"]
 
-    env = gym.make(VARIANTS[args.variant]["env_id"])
-    u = env.unwrapped
+    # Policy first, so the env can be built at whatever width the checkpoint
+    # expects -- same reason as docs/evaluate.py. Teachers trained before the
+    # privileged DR block are 25-dim and would otherwise fail against the 73-dim
+    # env, which is exactly the case --policy exists to reach. The student reads
+    # slices that are unaffected either way, so it always gets the full env.
     policy = load_policy(args.variant, args.agent, args.policy, args.frames)
+    privileged = (args.agent != "teacher"
+                  or policy.observation_space.shape[0] > BASE_OBS_DIM)
+    env = gym.make(VARIANTS[args.variant]["env_id"], privileged=privileged)
+    u = env.unwrapped
     meta = f"{args.variant} / {args.agent}"
+
+    # Seeded AFTER the policy loads, not before: the env's attitude/DR draws come
+    # from the global numpy stream, and SAC.load consumes a checkpoint-dependent
+    # amount of it. Seeding first made --seed 0 produce *different* drops for two
+    # different checkpoints, which defeats the main use of this script -- putting
+    # two policies on the same drop. docs/evaluate.py seeds here for the same reason.
+    np.random.seed(args.seed)
 
     for i in range(args.n):
         log, init, tilts = run_episode(env, u, policy, args.agent, args.frames,

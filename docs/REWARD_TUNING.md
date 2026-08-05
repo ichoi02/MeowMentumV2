@@ -1,5 +1,55 @@
 # Reward-weight tuning
 
+> **`w_sm` no longer exists as a reward weight.** Action smoothness moved into the
+> SAC actor loss (`smooth_sac.py::SmoothSAC`), so `CAT_W_SM` prices nothing and
+> `m_sm` is no longer reported by the env. Everything below was measured with it
+> still in the reward and is left as the record of that sweep. Consequence for the
+> shipped weights: `w_sm` was worth one 6% grid position in each variant, so the
+> **remaining** budget is 48% of task reward for tail (was 54%) and 18% for no-tail
+> (was 24%). The other four weights were not rescaled — the budget is a ceiling, so
+> underspending it is the safe direction, and no-tail is flat between 12% and 24%
+> (26.3% vs 26.6%). Tail is the one to watch: 54% is where it *gained* 8 pp, and
+> the nearest measured point below (36%) gives back half of that.
+
+## Action smoothness moved to the actor loss (2026-08-05)
+
+`w_sm` was deleted from the reward and replaced by a term in the SAC actor loss
+(`smooth_sac.py::SmoothSAC`), `smooth_coef · ‖π_μ(s_{t+1}) − π_μ(s_t)‖²` on the
+**deterministic mean** action. Three tail teachers, 1M steps, seed 0, evaluated at
+500 noisy drops with `docs/evaluate.py --stats`:
+
+| arm | success | median tilt f/r | `m_dsm` | `m_en` | `m_av` | `m_jv` | `m_time` | final \|ω\| |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| shipped teacher (old reward, `w_sm`=0.399) | 57.2% | 23/20 | 0.197 | 0.351 | 16.0 | 82.0 | 0.107 | 3.87 |
+| **`smooth_coef`=10 (new default)** | **56.8%** | 23/22 | **0.0128** | **0.228** | **12.4** | **55.5** | **0.027** | **2.86** |
+| `smooth_coef`=0 (control) | 44.0% | 26/27 | 0.277 | 0.378 | 12.2 | 66.9 | 0.143 | 4.87 |
+
+Two things this settles:
+
+- **Deleting the penalty without replacing it costs 13.2 pp** (57.2% → 44.0%). At 500
+  drops the binomial standard error is ~2.2 pp, so that gap is real and not a seed
+  artifact. Action smoothness was doing load-bearing work, not just cosmetic
+  shaping.
+- **The actor term recovers all of it and is strictly smoother.** 56.8% vs 57.2% is
+  inside noise (0.4 pp against a 2.2 pp se), while `m_dsm` drops **15x** against the
+  shipped teacher and **22x** against the control — and *every* other hardware-facing
+  magnitude falls too: torque −35%, joint velocity −32%, angular velocity −23%,
+  simultaneity −75%, final tumble rate −26%. Joint travel is unchanged (5.8 vs 6.9 rad
+  on `rot1`), so the policy is making the same large sweep, just without the jitter.
+
+The caveats: **one seed per arm**, and `smooth_coef`=10 was sized analytically (see
+`smooth_sac.py`) rather than swept — it happens to land well, but 3 and 30 were never
+measured. The 13.2 pp control gap is large enough to trust; the 0.4 pp
+new-vs-shipped difference is not evidence of parity beyond "not worse".
+
+Note `m_dsm` is **not** comparable to the old `m_sm`: it sums over channels rather
+than averaging, and is measured on the deterministic action rather than the
+exploration-noised one.
+
+---
+
+## The original five-weight sweep
+
 How the five penalty weights in `cat_env/cat_env.py` were set, and the sweep that
 set them. Run with `docs/sweep.py`; every number below is 500 random drops of the
 privileged teacher via `docs/evaluate.py`. **74 training runs (+3 outside the harness), 77M environment

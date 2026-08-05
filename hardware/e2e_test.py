@@ -31,7 +31,7 @@ import gymnasium as gym
 import cat_env  # noqa: F401  (registers Cat-v0 / CatNoTail-v0)
 import distillation as D
 import controller as C  # the real hardware controller (constants + stack_frames + util)
-from variants import VARIANTS
+from variants import VARIANTS, student_path, onnx_path
 
 # Floor for the closed-loop check. This is a pipeline-breakage tripwire, not a
 # performance target. N=100 with random attitudes is noisy -- observed no-tail runs
@@ -71,8 +71,8 @@ def tilt_deg(u, body):
 
 def main(variant="tail"):
     cfg = VARIANTS[variant]
-    ONNX_FILE = os.path.join(REPO, f"cat_controller{cfg['suffix']}.onnx")
-    PTH_FILE = os.path.join(REPO, f"student_policy{cfg['suffix']}.pth")
+    ONNX_FILE = onnx_path(variant)
+    PTH_FILE = student_path(variant)
 
     print(f"variant={variant}  env={cfg['env_id']}  onnx={os.path.basename(ONNX_FILE)}")
     print(f"N_FRAMES={C.N_FRAMES}  FILTER_ALPHA={C.FILTER_ALPHA}  "

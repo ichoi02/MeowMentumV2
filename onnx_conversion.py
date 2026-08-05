@@ -2,7 +2,7 @@ import os
 import torch
 import torch.nn as nn
 import time
-from variants import VARIANTS
+from variants import VARIANTS, policy_dir, student_path, onnx_path
 
 # 1. Define your policy/model architecture. 
 # This MUST exactly match the structure used during your RL training loop.
@@ -30,9 +30,9 @@ STATE_DIM = N_FRAMES * FRAME_DIM      # 14
 ACTION_DIM = 3
 
 def main(variant="tail"):
-    suffix = VARIANTS[variant]["suffix"]
-    PTH_FILE = f"student_policy{suffix}.pth"
-    ONNX_FILE = f"cat_controller{suffix}.onnx"
+    policy_dir()                    # policies/, created if missing
+    PTH_FILE = student_path(variant)
+    ONNX_FILE = onnx_path(variant)
 
     # 2. Instantiate the model and load the trained weights
     model = StudentPolicy(STATE_DIM, ACTION_DIM)

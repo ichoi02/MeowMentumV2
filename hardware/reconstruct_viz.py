@@ -161,7 +161,8 @@ def sim_source(dt_holder):
     u = env.unwrapped
     dt_holder[0] = u.dt
     try:
-        policy = SAC.load(os.path.join(REPO, "cat_controller"))
+        from variants import teacher_path
+        policy = SAC.load(teacher_path("tail"))
         predict = lambda o: policy.predict(o, deterministic=True)[0]
         print("sim source: driving with teacher policy (cat_controller)")
     except Exception as e:

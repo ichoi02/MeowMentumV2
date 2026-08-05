@@ -8,11 +8,12 @@ import mujoco.viewer
 from collections import deque
 from scipy.spatial.transform import Rotation as R
 import cat_env
+from cat_env.cat_env import BASE_OBS_DIM
 from distillation import (
     StudentPolicy, stack_frames, STUDENT_OBS_DIM, N_FRAMES,
     FRONT_GRAV_SLICE, JOINT_ANGLE_SLICE,
 )
-from variants import VARIANTS
+from variants import VARIANTS, teacher_path, student_path
 
 def student_frame(full_obs):
     """Clean (noise-free) single student frame: [front_proj_grav(3), joint_angles(4)]."""
@@ -41,19 +42,32 @@ def force_release(env, roll_deg=None, still=False):
     u.set_state(qpos, qvel)
     return u._get_obs()
 
-def visualize(variant="tail", agent="student", roll_deg=None, still=False):
+def visualize(variant="tail", agent="student", roll_deg=None, still=False,
+              policy_path=None):
     cfg = VARIANTS[variant]
-    env = gym.make(cfg["env_id"])
 
+    # Teacher loads BEFORE the env, so the env can be built at whatever width the
+    # checkpoint expects -- same reason as docs/evaluate.py. Teachers trained
+    # before the privileged DR block are 25-dim and would otherwise fail against
+    # the 73-dim env. The student's slices are unaffected either way (the block is
+    # appended last), so it always gets the full env.
+    teacher = None
     if agent == 'teacher':
         print("Loading teacher policy")
-        teacher = SAC.load(f"cat_controller{cfg['suffix']}")
-    elif agent =='student':
+        teacher = SAC.load(policy_path or teacher_path(variant))
+        privileged = teacher.observation_space.shape[0] > BASE_OBS_DIM
+    else:
+        privileged = True
+
+    env = gym.make(cfg["env_id"], privileged=privileged)
+
+    if agent == 'student':
         print("Loading student policy")
         student_obs_dim = STUDENT_OBS_DIM
         act_dim = env.action_space.shape[0]
         student = StudentPolicy(student_obs_dim, act_dim)
-        student.load_state_dict(torch.load(f"student_policy{cfg['suffix']}.pth", map_location="cpu"))
+        student.load_state_dict(torch.load(
+            policy_path or student_path(variant), map_location="cpu"))
         student.eval()
 
     obs, _ = env.reset()
@@ -121,5 +135,10 @@ if __name__ == "__main__":
                               "random attitude, e.g. 180 (upside-down) or 90 (on its side)")
     parser.add_argument("--still", action="store_true",
                          help="release with zero angular velocity (no initial tumble)")
+    parser.add_argument("--policy", default=None,
+                         help="explicit policy file to load, instead of the staged "
+                              "policies/cat_controller<suffix>.zip or "
+                              "policies/student_policy<suffix>.pth "
+                              "(same flag as docs/evaluate.py)")
     args = parser.parse_args()
-    visualize(args.variant, args.agent, args.roll, args.still)
+    visualize(args.variant, args.agent, args.roll, args.still, args.policy)

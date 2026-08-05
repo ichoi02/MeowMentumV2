@@ -9,8 +9,9 @@ from scipy.spatial.transform import Rotation as R
 import cat_env
 import cat_env.env_util as util
 from cat_env.cat_env import BASE_OBS_DIM
+import os
 import time
-from variants import VARIANTS
+from variants import VARIANTS, policy_dir, teacher_path
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
@@ -170,7 +171,7 @@ def run_dagger(variant="tail", n_frames=N_FRAMES, teacher=None, tag=""):
     # without it. The student's slices are identical either way (the block is
     # appended last), so this only affects what the expert is shown.
     print("Loading privileged expert policy...")
-    expert = SAC.load(teacher or f"cat_controller{cfg['suffix']}")
+    expert = SAC.load(teacher or teacher_path(variant))
     privileged = expert.observation_space.shape[0] > BASE_OBS_DIM
     env = gym.make(cfg["env_id"], privileged=privileged)
     print(f"  teacher obs {expert.observation_space.shape[0]}-dim "
@@ -231,7 +232,9 @@ def run_dagger(variant="tail", n_frames=N_FRAMES, teacher=None, tag=""):
     # Frame count is tagged into the filename only when it differs from the
     # default, so the standard artifact names stay exactly as the pipeline expects.
     frame_tag = "" if n_frames == N_FRAMES else f"_f{n_frames}"
-    out = f"student_policy{cfg['suffix']}{frame_tag}{tag}_{time.strftime('%Y%m%d-%H%M%S')}.pth"
+    out = os.path.join(
+        policy_dir(),
+        f"student_policy{cfg['suffix']}{frame_tag}{tag}_{time.strftime('%Y%m%d-%H%M%S')}.pth")
     torch.save(student.state_dict(), out)
     print(f"Student saved to {out}")
 
@@ -243,7 +246,8 @@ if __name__ == "__main__":
     parser.add_argument("--frames", type=int, default=N_FRAMES,
                          help=f"stacked student frames (default: {N_FRAMES})")
     parser.add_argument("--teacher", default=None,
-                         help="explicit teacher .zip (default: cat_controller<suffix>)")
+                         help="explicit teacher .zip "
+                              "(default: policies/cat_controller<suffix>.zip)")
     parser.add_argument("--tag", default="", help="extra suffix for the output filename")
     args = parser.parse_args()
     run_dagger(args.variant, args.frames, args.teacher, args.tag)

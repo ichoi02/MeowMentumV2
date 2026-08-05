@@ -38,7 +38,8 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
 | `train.py` | SAC teacher training + TensorBoard reward logging |
 | `distillation.py` | DAgger distillation of teacher → student (partial obs, frame-stacked) |
 | `test.py` | MuJoCo viewer for the teacher or student policy |
-| `onnx_conversion.py` | Export the student `.pth` → `cat_controller.onnx` (opset 11, single file) |
+| `onnx_conversion.py` | Export the student `.pth` → `policies/cat_controller.onnx` (opset 11, single file) |
+| `policies/` | **All trained artifacts**: teacher `.zip`, student `.pth`, exported `.onnx`. Paths come from `variants.py` (`teacher_path` / `student_path` / `onnx_path`), so no script hardcodes a location |
 | `hardware/controller.py` | Raspberry Pi control loop: read IMUs/encoders → ONNX → motor targets |
 | `hardware/PD_control_{front,back}/*.ino` | Teensy 4.0 firmware: 1 kHz PD, BNO08x IMU, serial protocol |
 | `hardware/e2e_test.py` | Hardware-in-the-loop test (ONNX/obs/action parity + closed-loop righting) |
@@ -71,11 +72,10 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
   sim model of the Teensy inner loop.
 - **Reward** (dense, no time ramp — the discount drives "upright as soon as possible"):
   `r = w_pos·(½(up_f+up_r) + up_f·up_r) + w_bonus·1[both upright] − Σ penalties`,
-  with per-body uprightness `up = ½(cos(tilt)+1)`. Five penalties, all hardware-facing:
+  with per-body uprightness `up = ½(cos(tilt)+1)`. Four penalties, all hardware-facing:
 
   | term | penalizes | why |
   |---|---|---|
-  | `w_sm·mean(Δa²)` | action rate | jitter the real actuator cannot track |
   | `w_en·mean(τ²)` | applied torque | energy |
   | `w_av·mean(ω²)` | body angular velocity | landing upright but still tumbling |
   | `w_jv·mean(q̇²)` | joint velocity | motion that does not buy reorientation |
@@ -83,12 +83,24 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
 
   Each `info` dict also reports the **unweighted** magnitude `m_*` beside `r_*` — that,
   not the weighted term, is what reward tuning reads. See `docs/REWARD_TUNING.md`;
-  weights are overridable as `CAT_W_{SM,EN,AV,JV,TIME}` without a code edit.
+  weights are overridable as `CAT_W_{EN,AV,JV,TIME}` without a code edit.
 
   Weights are **per variant** (`cat_env.py::PENALTY_WEIGHTS`), not a shared set scaled
-  down: the tuned no-tail/tail ratios are `sm` 1.03, `en` 0.69, `av` 0.00, `jv` 0.78,
-  `time` 0.32. Tail runs a 54% budget (of task reward) and *gains* 8 pp of success from
-  it; no-tail runs 24% and collapses to passivity past ~36%.
+  down: the tuned no-tail/tail ratios are `en` 0.69, `av` 0.00, `jv` 0.78, `time` 0.32.
+  As swept, tail ran a 54% budget (of task reward) and *gained* 8 pp of success from it;
+  no-tail ran 24% and collapses to passivity past ~36%. Moving action rate out of the
+  reward (below) drops one 6% grid position from each, leaving 48% and 18%.
+- **Action smoothness is an actor-loss term, not a reward penalty**
+  (`smooth_sac.py::SmoothSAC`). The old `w_sm·mean(Δa²)` is gone; the actor now
+  minimizes `smooth_coef·‖π_μ(s_{t+1}) − π_μ(s_t)‖²` over consecutive replay states,
+  where `π_μ = tanh(μ)` is the **deterministic mean** — what `deterministic=True`, the
+  ONNX export and the Teensy actually command — rather than a sample carrying SAC's
+  exploration noise. Penalizing the sample would price jitter the deployed policy does
+  not have and would let the actor satisfy the term by shrinking `log_std`, fighting the
+  `ent_coef` auto-tuner. As a reward it also had to be routed through the critic and
+  traded against task reward inside the same scalar `Q`, which is what made `w_sm` a
+  collapse risk; here the gradient reaches the actor directly. Logged as
+  `train/smooth_loss` at any coefficient (including 0), same convention as `m_*`.
 - **Domain randomization** (per reset): mass, COM, inertia, action delay, initial joint
   angles (±0.2 rad), and a uniformly random initial attitude (`init_ang_vel_max` sets an
   optional initial tumble). Damping, armature, friction, `ctrlrange` and the PD gains are
@@ -98,12 +110,18 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
 
 ## Training & distillation
 
-- **Teacher** (`train.py`): SAC, `MlpPolicy` `[256,256]`, 10 parallel envs, ~1M steps.
-  Saves `cat_controller_<timestamp>.zip` (rename/stage as `cat_controller.zip`).
+- **Teacher** (`train.py`): `SmoothSAC` (SAC + the actor smoothness term above),
+  `MlpPolicy` `[256,256]`, 10 parallel envs, ~1M steps. `--smooth-coef` sets the
+  coefficient (default 10.0, sized so the term carries the pressure the old `w_sm` did
+  — derivation in `smooth_sac.py`; `0` gives plain SAC). Checkpoints stay loadable by
+  plain `SAC.load`, since only the training objective changes, not the policy. Saves
+  `policies/cat_controller_<timestamp>.zip` (rename/stage as
+  `policies/cat_controller.zip`, which is what every script loads by default).
 - **Student** (`distillation.py`): DAgger. The student sees only the real robot's
   sensors — **front projected gravity (3) + 4 joint angles**, **stacked over 4 timesteps
   (28-dim)** so it can infer the velocities the privileged teacher used. Trained with
-  observation noise + random delay for robustness. Saves `student_policy_<timestamp>.pth`.
+  observation noise + random delay for robustness. Saves
+  `policies/student_policy_<timestamp>.pth` (stage as `policies/student_policy.pth`).
 
 ## Hardware
 
@@ -135,10 +153,10 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
 pip install -r requirements.txt          # sim/training deps
 
 # --- simulation ---
-python train.py                          # train the SAC teacher (-> cat_controller_*.zip)
+python train.py                          # SAC teacher  -> policies/cat_controller_*.zip
 python test.py                           # view teacher/student in MuJoCo
-python distillation.py                   # DAgger distill teacher -> student_policy_*.pth
-python onnx_conversion.py                # student_policy.pth -> cat_controller.onnx
+python distillation.py                   # DAgger        -> policies/student_policy_*.pth
+python onnx_conversion.py                # student .pth  -> policies/cat_controller.onnx
 
 # --- validation ---
 python hardware/e2e_test.py                              # full pipeline parity + righting

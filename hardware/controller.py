@@ -45,7 +45,7 @@ import csv
 import threading
 from collections import deque
 import cat_env.env_util as util
-from variants import VARIANTS
+from variants import VARIANTS, onnx_path
 import socket
 
 # --- CONFIGURATION ---
@@ -286,12 +286,15 @@ def find_onnx(variant):
 
     Checked in order: the working directory (the historical behavior -- a Pi deploy
     that drops the .onnx next to wherever it launches keeps working), then beside
-    this file, then the repo root where onnx_conversion.py writes it. Raising with
+    this file, then policies/ where onnx_conversion.py writes it, and finally the
+    repo root, which is where it used to be written before artifacts moved into
+    policies/ (kept so an older checkout or deploy still resolves). Raising with
     the full candidate list beats an onnxruntime error naming only the first path.
     """
     name = f"cat_controller{VARIANTS[variant]['suffix']}.onnx"
     here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [name, os.path.join(here, name), os.path.join(here, os.pardir, name)]
+    candidates = [name, os.path.join(here, name), onnx_path(variant),
+                  os.path.join(here, os.pardir, name)]
     for c in candidates:
         if os.path.isfile(c):
             return os.path.abspath(c)

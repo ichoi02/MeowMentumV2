@@ -9,7 +9,10 @@ import json
 import os
 from collections import defaultdict
 
-TERMS = ("sm", "en", "av", "jv", "time")
+# "sm" is deliberately absent: the action-rate penalty is no longer a reward
+# weight (it is an actor-loss term, smooth_sac.py), so CAT_W_SM prices nothing.
+# Historical results JSONL still carries m_sm; it is simply ignored here.
+TERMS = ("en", "av", "jv", "time")
 FRACS = (0.02, 0.06, 0.18, 0.50)
 ZERO = {t: 0.0 for t in TERMS}
 

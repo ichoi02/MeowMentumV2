@@ -110,7 +110,7 @@ def main():
                 print(f"[{done}/{len(jobs)}] {res['name']}: {res['success_pct']:.1f}%  "
                       f"tilt {res['mean_tilt']:.0f}  "
                       + " ".join(f"{k[2:]}={res[k]:.3g}"
-                                 for k in ("m_sm", "m_en", "m_av", "m_jv", "m_time"))
+                                 for k in ("m_en", "m_av", "m_jv", "m_time", "m_dsm"))
                       + f"  ({res['train_s']}s)", flush=True)
     out.close()
 

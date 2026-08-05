@@ -31,23 +31,33 @@ up_thresh = 0.95  # per-body uprightness threshold for the success bonus (~26 de
 #   1. What binds is the TOTAL penalty budget, not any single weight. Grid
 #      positions are sized in reward units (fraction of that variant's baseline
 #      task reward), because a raw weight means nothing on its own: m_av ~ 18 and
-#      m_sm ~ 0.25, so one weight is crushing where the other is negligible.
+#      m_en ~ 0.5, so one weight is crushing where the other is negligible.
 #   2. The two variants need DIFFERENT weights, not a shared shape scaled down.
-#      The ratios that came out of the sweep are sm 1.03, en 0.69, av 0.00,
-#      jv 0.78, time 0.32 -- no single scale factor produces that, which is why
-#      the old notail_penalty_scale is gone.
+#      The ratios that came out of the sweep are en 0.69, av 0.00, jv 0.78,
+#      time 0.32 -- no single scale factor produces that, which is why the old
+#      notail_penalty_scale is gone.
 #   3. w_av is the weak term. Swept alone it raises the magnitudes it does NOT
-#      price (at 50% of budget m_sm goes UP 29%): contact is disabled, angular
-#      momentum is conserved, and the policy cannot shed rotation -- it only
-#      thrashes trying. Tail keeps it at the cheapest useful setting; no-tail
-#      drops it entirely.
+#      price: contact is disabled, angular momentum is conserved, and the policy
+#      cannot shed rotation -- it only thrashes trying. Tail keeps it at the
+#      cheapest useful setting; no-tail drops it entirely.
 #
 # Budgets: tail 54% of task reward (the ceiling -- 60% and above lands at 41%),
 # no-tail 24% (its ceiling is between 24% and 36%, where success halves).
+#
+# Both were measured with the action-rate term `w_sm` still in the reward. It has
+# since moved into the ACTOR loss (smooth_sac.py::SmoothSAC), and the four weights
+# below are left at their swept values rather than rescaled: the budget is a
+# CEILING, so spending less of it is the safe direction. `w_sm` was worth exactly
+# one 6% grid position in each variant, so what is left here is 48% of task reward
+# for tail (89% of the swept budget) and 18% for no-tail (75%). No-tail is
+# comfortably fine -- 12% and 24% score 26.3% and 26.6%, inside noise of each
+# other. Tail is the one to watch: 54% was where it *gained* 8 pp, and the nearest
+# measured point below (36%) gave back half of that. If the tail variant regresses,
+# that is the first thing to check, not the new actor term.
 PENALTY_WEIGHTS = {
-    #          action rate  torque     body omega  joint vel   simultaneity
-    "tail":   {"sm": 0.399, "en": 0.646, "av": 0.00547, "jv": 0.000815, "time": 0.848},
-    "notail": {"sm": 0.412, "en": 0.447, "av": 0.0,     "jv": 0.000633, "time": 0.271},
+    #           torque      body omega   joint vel     simultaneity
+    "tail":   {"en": 0.646, "av": 0.00547, "jv": 0.000815, "time": 0.848},
+    "notail": {"en": 0.447, "av": 0.0,     "jv": 0.000633, "time": 0.271},
 }
 
 init_ang_vel_max = 0.5  # rad/s, per-axis range for random initial tumble
@@ -204,7 +214,6 @@ class CatEnv(MujocoEnv, EzPickle):
         # sweep needs no code edit.
         variant = "notail" if "notail" in os.path.basename(model_path) else "tail"
         w = PENALTY_WEIGHTS[variant]
-        self.w_sm = _w("SM", w["sm"])
         self.w_en = _w("EN", w["en"])
         self.w_av = _w("AV", w["av"])
         self.w_jv = _w("JV", w["jv"])
@@ -498,9 +507,14 @@ class CatEnv(MujocoEnv, EzPickle):
         # drift from what the reward actually optimizes.
         d_action = np.abs(action - self.prev_action)
 
-        # Action rate (jitter) and applied torque: the original two hardware terms.
-        m_sm = np.mean(d_action ** 2)
+        # Applied torque: energy.
         m_en = np.mean(self.data.ctrl ** 2)
+
+        # NOTE: the action-rate term (`w_sm * mean(d_action ** 2)`) used to sit
+        # here. It is now an actor-loss term on the DETERMINISTIC mean action --
+        # see smooth_sac.py -- so the quantity smoothed is the commanded
+        # trajectory rather than the exploration-noised action the buffer holds.
+        # d_action survives because m_time still needs it.
 
         # Body angular velocity: an upright pose reached while still tumbling is not
         # a landing. Contact is disabled and angular momentum is conserved, so the
@@ -514,8 +528,9 @@ class CatEnv(MujocoEnv, EzPickle):
 
         # Joint velocity: suppress motion that does not buy reorientation -- flailing
         # inside the joint limits, and the fast reversals that a real geared motor
-        # cannot track. Penalizing velocity rather than the commanded rate (m_sm)
-        # catches motion the PD loop produces on its own, e.g. ringing after a step.
+        # cannot track. Penalizing velocity rather than the commanded rate (which
+        # the actor-loss smoothness term now covers) catches motion the PD loop
+        # produces on its own, e.g. ringing after a step.
         m_jv = np.mean(self.data.qvel[6:] ** 2)
 
         # Timing: penalize the three channels moving AT THE SAME TIME. The pairwise
@@ -528,19 +543,17 @@ class CatEnv(MujocoEnv, EzPickle):
         m_time = (d_action[0] * d_action[1] + d_action[0] * d_action[2]
                   + d_action[1] * d_action[2])
 
-        r_sm, r_en = self.w_sm * m_sm, self.w_en * m_en
+        r_en = self.w_en * m_en
         r_av, r_jv, r_time = self.w_av * m_av, self.w_jv * m_jv, self.w_time * m_time
 
-        final_reward = r_pos + r_bonus - r_sm - r_en - r_av - r_jv - r_time
+        final_reward = r_pos + r_bonus - r_en - r_av - r_jv - r_time
         reward_info = {
             "r_pos": r_pos,
             "r_bonus": r_bonus,
-            "r_sm": r_sm,
             "r_en": r_en,
             "r_av": r_av,
             "r_jv": r_jv,
             "r_time": r_time,
-            "m_sm": m_sm,
             "m_en": m_en,
             "m_av": m_av,
             "m_jv": m_jv,

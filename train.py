@@ -1,17 +1,20 @@
 import gymnasium as gym
-from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 import cat_env
+import os
 import time
-from variants import VARIANTS
+from smooth_sac import SmoothSAC
+from variants import VARIANTS, policy_dir
 
 class TensorboardRewardCallback(BaseCallback):
     def __init__(self, verbose=0):
         super().__init__(verbose)
 
-    TERMS = ("r_pos", "r_bonus", "r_sm", "r_en", "r_av", "r_jv", "r_time", "up_mean")
+    # r_sm is gone: action smoothness is an actor-loss term now, logged by
+    # SmoothSAC as train/smooth_loss rather than by the env.
+    TERMS = ("r_pos", "r_bonus", "r_en", "r_av", "r_jv", "r_time", "up_mean")
 
     def _on_step(self) -> bool:
         # locals["infos"] is a list of info dictionaries from the vectorized environments
@@ -23,7 +26,8 @@ class TensorboardRewardCallback(BaseCallback):
         return True
 
 def train(variant="tail", total_timesteps=1_000_000, tag="", n_envs=10, seed=None,
-          out=None, gradient_steps=1, run_name=None, privileged=True):
+          out=None, gradient_steps=1, run_name=None, privileged=True,
+          smooth_coef=10.0):
     cfg = VARIANTS[variant]
 
     env = make_vec_env(
@@ -33,9 +37,10 @@ def train(variant="tail", total_timesteps=1_000_000, tag="", n_envs=10, seed=Non
         env_kwargs={"privileged": privileged},
     )
 
-    model = SAC(
+    model = SmoothSAC(
         "MlpPolicy",
         env,
+        smooth_coef=smooth_coef,  # L2 action-smoothness in the actor loss
         policy_kwargs=dict(net_arch=[256, 256]),
         verbose=1,
         tensorboard_log="./run_logs/",
@@ -62,7 +67,11 @@ def train(variant="tail", total_timesteps=1_000_000, tag="", n_envs=10, seed=Non
         tb_log_name=run_name or "SAC",
     )
 
-    model_path = out or f"cat_controller{cfg['suffix']}{tag}_{time.strftime('%Y%m%d-%H%M%S')}.zip"
+    # Explicit --out is honoured as given (sweeps write to their own dirs);
+    # otherwise the timestamped checkpoint lands in policies/.
+    model_path = out or os.path.join(
+        policy_dir(),
+        f"cat_controller{cfg['suffix']}{tag}_{time.strftime('%Y%m%d-%H%M%S')}.zip")
     model.save(model_path)
     print(f"Model saved to {model_path}")
     return model_path
@@ -86,6 +95,11 @@ if __name__ == "__main__":
     parser.add_argument("--no-privileged", action="store_true",
                         help="train on the 25-dim obs without the DR block "
                              "(control arm for whether the privileged block helps)")
+    parser.add_argument("--smooth-coef", type=float, default=10.0,
+                        help="weight on the L2 action-smoothness term in the actor "
+                             "loss (default: 10.0; 0 disables it, and train/smooth_loss "
+                             "is still logged so the ablation is readable)")
     args = parser.parse_args()
     train(args.variant, args.steps, args.tag, args.envs, args.seed, args.out,
-          args.gradient_steps, args.run_name, privileged=not args.no_privileged)
+          args.gradient_steps, args.run_name, privileged=not args.no_privileged,
+          smooth_coef=args.smooth_coef)
