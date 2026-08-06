@@ -1,0 +1,98 @@
+[
+ {
+  "name": "s000_notail",
+  "variant": "notail",
+  "weights": {
+   "en": 0.0,
+   "av": 0.0,
+   "jv": 0.0,
+   "time": 0.0
+  },
+  "seed": 0,
+  "k": 0.0
+ },
+ {
+  "name": "s000_tail",
+  "variant": "tail",
+  "weights": {
+   "en": 0.0,
+   "av": 0.0,
+   "jv": 0.0,
+   "time": 0.0
+  },
+  "seed": 0,
+  "k": 0.0
+ },
+ {
+  "name": "s025_notail",
+  "variant": "notail",
+  "weights": {
+   "en": 0.163,
+   "av": 0.00137,
+   "jv": 0.0002,
+   "time": 0.212
+  },
+  "seed": 0,
+  "k": 0.25
+ },
+ {
+  "name": "s025_tail",
+  "variant": "tail",
+  "weights": {
+   "en": 0.163,
+   "av": 0.00137,
+   "jv": 0.0002,
+   "time": 0.212
+  },
+  "seed": 0,
+  "k": 0.25
+ },
+ {
+  "name": "s050_notail",
+  "variant": "notail",
+  "weights": {
+   "en": 0.325,
+   "av": 0.00275,
+   "jv": 0.0004,
+   "time": 0.425
+  },
+  "seed": 0,
+  "k": 0.5
+ },
+ {
+  "name": "s050_tail",
+  "variant": "tail",
+  "weights": {
+   "en": 0.325,
+   "av": 0.00275,
+   "jv": 0.0004,
+   "time": 0.425
+  },
+  "seed": 0,
+  "k": 0.5
+ },
+ {
+  "name": "s075_notail",
+  "variant": "notail",
+  "weights": {
+   "en": 0.488,
+   "av": 0.00413,
+   "jv": 0.0006,
+   "time": 0.637
+  },
+  "seed": 0,
+  "k": 0.75
+ },
+ {
+  "name": "s075_tail",
+  "variant": "tail",
+  "weights": {
+   "en": 0.488,
+   "av": 0.00413,
+   "jv": 0.0006,
+   "time": 0.637
+  },
+  "seed": 0,
+  "k": 0.75
+ }
+]

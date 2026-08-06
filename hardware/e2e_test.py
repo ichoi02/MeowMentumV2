@@ -3,7 +3,7 @@ End-to-end hardware-pipeline test (no physical hardware required).
 
 Drives the MuJoCo Cat-v0 sim as the "physical robot" and runs the ACTUAL
 hardware inference pipeline from controller.py (projected-gravity obs, 4-frame
-stacking, ONNX inference, action low-pass filter, joint-range mapping). Verifies
+stacking, ONNX inference, joint-range mapping). Verifies
 each stage matches the simulation/training pipeline, then confirms closed-loop
 righting.
 
@@ -75,7 +75,7 @@ def main(variant="tail"):
     PTH_FILE = student_path(variant)
 
     print(f"variant={variant}  env={cfg['env_id']}  onnx={os.path.basename(ONNX_FILE)}")
-    print(f"N_FRAMES={C.N_FRAMES}  FILTER_ALPHA={C.FILTER_ALPHA}  "
+    print(f"N_FRAMES={C.N_FRAMES}  "
           f"ranges(roll/pitch/tail)={C.ROLL_RANGE}/{C.PITCH_RANGE}/{C.TAIL_RANGE}")
 
     sess = ort.InferenceSession(ONNX_FILE)
@@ -128,22 +128,20 @@ def main(variant="tail"):
             sim_hist.clear()
     check("controller obs == sim student obs", maxdiff2 < 1e-6, f"max|diff|={maxdiff2:.2e}")
 
-    # ---- TEST 3: controller filter+map == sim internal executed target ----
+    # ---- TEST 3: controller map == sim internal executed target ----
     # Disable the sim's domain-randomization action delay so the comparison is 1:1.
     obs, _ = env.reset()
     u.action_delay = 0
     u.action_buffer = []
-    ctrl_filt = np.zeros(3, dtype=np.float32)
     rng = np.random.default_rng(0)
     maxdiff3 = 0.0
     n_cmp = 0
     for _ in range(300):
         raw = rng.uniform(-1, 1, 3).astype(np.float32)
-        ctrl_filt = C.FILTER_ALPHA * raw + (1.0 - C.FILTER_ALPHA) * ctrl_filt
         c_targets = np.array([
-            C.util.map_value(float(ctrl_filt[0]), -1, 1, -C.ROLL_RANGE, C.ROLL_RANGE),
-            C.util.map_value(float(ctrl_filt[1]), -1, 1, -C.PITCH_RANGE, C.PITCH_RANGE),
-            C.util.map_value(float(ctrl_filt[2]), -1, 1, -C.TAIL_RANGE, C.TAIL_RANGE),
+            C.util.map_value(float(raw[0]), -1, 1, -C.ROLL_RANGE, C.ROLL_RANGE),
+            C.util.map_value(float(raw[1]), -1, 1, -C.PITCH_RANGE, C.PITCH_RANGE),
+            C.util.map_value(float(raw[2]), -1, 1, -C.TAIL_RANGE, C.TAIL_RANGE),
         ])
         obs, _, term, trunc, _ = env.step(raw)
         if not (term or trunc):
@@ -154,12 +152,11 @@ def main(variant="tail"):
             obs, _ = env.reset()
             u.action_delay = 0
             u.action_buffer = []
-            ctrl_filt = np.zeros(3, dtype=np.float32)
-    check("controller filter+map == sim executed target", maxdiff3 < 1e-6,
+    check("controller map == sim executed target", maxdiff3 < 1e-6,
           f"max|diff|={maxdiff3:.2e} over {n_cmp} steps")
 
     # ---- TEST 4: closed-loop righting through the full hardware pipeline ----
-    # Build obs from emulated sensors -> ONNX -> feed to env (sim filter+map+PD == controller+Teensy).
+    # Build obs from emulated sensors -> ONNX -> feed to env (sim map+PD == controller+Teensy).
     N = 100
     ok = 0
     ftilt, rtilt = [], []

@@ -59,7 +59,6 @@ CONTROL_DURATION = 0.74   # sim episode: 37 steps x (1/50 s) = 0.74 s
 
 # --- Policy / sim-matching parameters (MUST match cat_env/cat_env.py + model/cat.xml) ---
 N_FRAMES = 2              # stacked student frames  (distillation.N_FRAMES)
-FILTER_ALPHA = 0.3        # action low-pass gain    (cat_env.filter_alpha)
 GRAV_DIM = 3
 # Joint target ranges (rad), from model/cat.xml jnt_range:
 ROLL_RANGE = 7.28         # rot1 / rot2   (+/-417 deg)
@@ -449,10 +448,9 @@ def main():
 
     print(f"Starting loop at {LOOP_HZ}Hz. Press Ctrl+C to quit.")
 
-    # Student temporal state (reset per drop). Matches cat_env reset: filter starts
-    # neutral, frame history is prefilled with the first frame on the first tick.
+    # Student temporal state (reset per drop). Matches cat_env reset: the frame
+    # history is prefilled with the first frame on the first tick.
     frame_hist = deque(maxlen=N_FRAMES)
-    action_filt = np.zeros(3, dtype=np.float32)
 
     try:
         while(True):
@@ -487,14 +485,11 @@ def main():
                 # Run ONNX inference -> normalized action in [-1, 1].
                 raw_action = ort_session.run(None, {input_name: obs_tensor})[0][0]
 
-                # Action low-pass filter (MUST match cat_env FILTER_ALPHA).
-                action_filt = FILTER_ALPHA * raw_action + (1.0 - FILTER_ALPHA) * action_filt
-
                 # Map normalized action -> joint target angles (rad), using the sim
                 # jnt_range from model/cat.xml. rot2 mirrors rot1 (rot2 = -rot1).
-                roll  = util.map_value(float(action_filt[0]), -1, 1, -ROLL_RANGE, ROLL_RANGE)
-                pitch = util.map_value(float(action_filt[1]), -1, 1, -PITCH_RANGE, PITCH_RANGE)
-                tail  = util.map_value(float(action_filt[2]), -1, 1, -TAIL_RANGE, TAIL_RANGE)
+                roll  = util.map_value(float(raw_action[0]), -1, 1, -ROLL_RANGE, ROLL_RANGE)
+                pitch = util.map_value(float(raw_action[1]), -1, 1, -PITCH_RANGE, PITCH_RANGE)
+                tail  = util.map_value(float(raw_action[2]), -1, 1, -TAIL_RANGE, TAIL_RANGE)
                 action = [roll, pitch, tail, -roll]
 
             front.set_motors(action[0], action[1])

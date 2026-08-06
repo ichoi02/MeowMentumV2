@@ -66,8 +66,7 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
   teacher-only and sits **last**, so the student slices are unaffected; construct the
   env with `privileged=False` to get the old 25-dim space back for pre-DR checkpoints.
 - **Action (3-dim, in [−1,1]):** `[roll, pitch, tail]`, mapped to joint targets over
-  `jnt_range`; the rear roll `rot2` is driven as `−roll` (counter-twist). A first-order
-  action low-pass (`filter_alpha=0.3`) suppresses jitter. An inner **PD controller**
+  `jnt_range`; the rear roll `rot2` is driven as `−roll` (counter-twist). An inner **PD controller**
   (`env_util.PDController`, per-joint gains) tracks the targets each 1 ms substep — the
   sim model of the Teensy inner loop.
 - **Reward** (dense, no time ramp — the discount drives "upright as soon as possible"):
@@ -85,11 +84,19 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
   not the weighted term, is what reward tuning reads. See `docs/REWARD_TUNING.md`;
   weights are overridable as `CAT_W_{EN,AV,JV,TIME}` without a code edit.
 
-  Weights are **per variant** (`cat_env.py::PENALTY_WEIGHTS`), not a shared set scaled
-  down: the tuned no-tail/tail ratios are `en` 0.69, `av` 0.00, `jv` 0.78, `time` 0.32.
-  As swept, tail ran a 54% budget (of task reward) and *gained* 8 pp of success from it;
-  no-tail ran 24% and collapses to passivity past ~36%. Moving action rate out of the
-  reward (below) drops one 6% grid position from each, leaving 48% and 18%.
+  Both variants **share one weight vector** (`cat_env.py::PENALTY_WEIGHTS`) — `en` 0.65,
+  `av` 0.0055, `jv` 0.0008, `time` 0.85 — because this is a *morphology* ablation: if the
+  arms run different rewards, the tail-vs-no-tail gap mixes the tail's contribution with a
+  reward-budget difference. Found by scaling the old per-variant tail vector by a single
+  `k` and scoring no-tail (the binding arm) on fixed releases at roll 180/90/45/0, pitch 0
+  — mean success rose monotonically 47.2% at `k`=0 to 58.6% at `k`=1
+  (`docs/shared_k_runs.jsonl`). Two caveats: the vector costs the trained no-tail policy
+  only **~12% of task reward**, not the ~43% the same numbers cost when they were tuned
+  (moving action rate to the actor loss collapsed the `m_time` baseline 7x, so the old
+  ~18–30% collapse ceiling was never reached anywhere in the sweep); and the mean hides a
+  **monotone regression at roll 180**, 24.0% at `k`=0 down to 16.3% at `k`=1, while roll 90
+  climbs 34.0% → 72.3%. Not yet validated on the tail arm. Historical per-variant tuning,
+  including the budgets those weights came from, is in `docs/REWARD_TUNING.md`.
 - **Action smoothness is an actor-loss term, not a reward penalty**
   (`smooth_sac.py::SmoothSAC`). The old `w_sm·mean(Δa²)` is gone; the actor now
   minimizes `smooth_coef·‖π_μ(s_{t+1}) − π_μ(s_t)‖²` over consecutive replay states,
@@ -118,8 +125,9 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
   `policies/cat_controller_<timestamp>.zip` (rename/stage as
   `policies/cat_controller.zip`, which is what every script loads by default).
 - **Student** (`distillation.py`): DAgger. The student sees only the real robot's
-  sensors — **front projected gravity (3) + 4 joint angles**, **stacked over 4 timesteps
-  (28-dim)** so it can infer the velocities the privileged teacher used. Trained with
+  sensors — **front projected gravity (3) + 4 joint angles**, **stacked over 2 timesteps
+  (14-dim, `distillation.N_FRAMES`)** so it can infer the velocities the privileged
+  teacher used; `--frames` changes it and tags the filename. Trained with
   observation noise + random delay for robustness. Saves
   `policies/student_policy_<timestamp>.pth` (stage as `policies/student_policy.pth`).
 
@@ -131,9 +139,11 @@ tail) to rotate its body halves upright — exactly how a cat rights itself mid-
   `qr,qi,qj,qk,angle1,angle2,acc` at 50 Hz. Gear ratios: roll **9.68:1**, pitch/tail
   **34.014:1**. Teensy PD gains = sim gains × 1024 (normalized torque → PWM).
 - **Pi loop** (`hardware/controller.py`): 50 Hz. Reads both IMUs/encoders → builds the
-  28-dim student obs (front projected gravity + joints, 4-frame stack) → ONNX inference →
-  action filter → joint-target mapping → serial. Detects free-fall (`acc < 3.5`), then
-  drives for `CONTROL_DURATION = 0.74 s` and logs telemetry CSV.
+  14-dim student obs (front projected gravity + joints, 2-frame stack) → ONNX inference →
+  joint-target mapping → serial. The policy output is commanded as-is: there is no action
+  filter, so smoothness comes from the actor-loss term rather than the control path, and
+  `e2e_test.py` checks the mapping against the sim's executed target. Detects free-fall
+  (`acc < 3.5`), then drives for `CONTROL_DURATION = 0.74 s` and logs telemetry CSV.
 
 ## Validation tools
 

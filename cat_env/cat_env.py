@@ -18,51 +18,52 @@ w_pos = _w("POS", 1.0)      # uprightness reward weight
 w_bonus = _w("BONUS", 1.0)  # bonus when BOTH bodies are upright (up_f, up_r > up_thresh)
 up_thresh = 0.95  # per-body uprightness threshold for the success bonus (~26 deg tilt)
 
-# Penalty terms, PER VARIANT. Every one trades directly against w_pos: set too
-# high, a variant that cannot *reliably* right itself scores better holding still
-# than trying, and training collapses to a passive policy instead of a
-# bad-but-trying one. The no-tail variant does exactly that at 36% of task reward
-# (6.8% success, 86 deg final tilt = no better than doing nothing).
+# Penalty terms, SHARED BY BOTH VARIANTS. Every one trades directly against w_pos:
+# set too high, a variant that cannot *reliably* right itself scores better holding
+# still than trying, and training collapses to a passive policy instead of a
+# bad-but-trying one.
 #
-# Tuned from all-zero by sweeping each term alone over a 4-point grid and then
-# combining -- 77 training runs, both variants, docs/REWARD_TUNING.md. Three
-# things that sweep settled and that any future edit should respect:
+# One vector for both arms is a deliberate choice, and it costs something. This is
+# a MORPHOLOGY ablation: if the arms run different rewards, the tail-vs-no-tail gap
+# mixes the tail's physical contribution with a reward-budget difference, which is
+# what the per-variant weights that used to live here did. Identical raw weights
+# make the reward function literally the same; the two robots then spend different
+# FRACTIONS of their task reward on it, and that difference is a consequence of the
+# morphology rather than a confound in the comparison.
 #
-#   1. What binds is the TOTAL penalty budget, not any single weight. Grid
-#      positions are sized in reward units (fraction of that variant's baseline
-#      task reward), because a raw weight means nothing on its own: m_av ~ 18 and
-#      m_en ~ 0.5, so one weight is crushing where the other is negligible.
-#   2. The two variants need DIFFERENT weights, not a shared shape scaled down.
-#      The ratios that came out of the sweep are en 0.69, av 0.00, jv 0.78,
-#      time 0.32 -- no single scale factor produces that, which is why the old
-#      notail_penalty_scale is gone.
-#   3. w_av is the weak term. Swept alone it raises the magnitudes it does NOT
-#      price: contact is disabled, angular momentum is conserved, and the policy
-#      cannot shed rotation -- it only thrashes trying. Tail keeps it at the
-#      cheapest useful setting; no-tail drops it entirely.
+# Found by scaling the previous tail vector by a single factor k and evaluating on
+# fixed release attitudes -- roll 180/90/45/0 at pitch 0, 300 drops each, held-out
+# seed 4242 (docs/shared_k_runs.jsonl). No-tail is the binding arm, so k was chosen
+# on it. Mean success rose monotonically from 47.2% at k=0 to 58.6% at k=1, and k=1
+# is what is below.
 #
-# Budgets: tail 54% of task reward (the ceiling -- 60% and above lands at 41%),
-# no-tail 24% (its ceiling is between 24% and 36%, where success halves).
+# Two things any future edit should know:
 #
-# Both were measured with the action-rate term `w_sm` still in the reward. It has
-# since moved into the ACTOR loss (smooth_sac.py::SmoothSAC), and the four weights
-# below are left at their swept values rather than rescaled: the budget is a
-# CEILING, so spending less of it is the safe direction. `w_sm` was worth exactly
-# one 6% grid position in each variant, so what is left here is 48% of task reward
-# for tail (89% of the swept budget) and 18% for no-tail (75%). No-tail is
-# comfortably fine -- 12% and 24% score 26.3% and 26.6%, inside noise of each
-# other. Tail is the one to watch: 54% was where it *gained* 8 pp, and the nearest
-# measured point below (36%) gave back half of that. If the tail variant regresses,
-# that is the first thing to check, not the new actor term.
+#   1. The budget is far smaller than the raw numbers suggest, because the grid
+#      that produced them was sized against baselines that no longer hold. Action
+#      smoothness moved into the ACTOR loss (smooth_sac.py), which suppresses
+#      action increments unconditionally, and m_time is quadratic in those -- the
+#      penalty-free no-tail baseline fell from m_time 0.304 to 0.044. This vector
+#      costs the trained no-tail policy ~12% of its task reward, not the ~43% the
+#      same numbers cost when they were tuned. The old collapse ceiling (~18-30%)
+#      was never reached anywhere in the k sweep.
+#   2. The mean over release angles hides a real regression at roll 180. Success
+#      there falls monotonically as k rises -- 24.0% at k=0 to 16.3% at k=1 --
+#      while roll 90 climbs 34.0% to 72.3%. The budget buys success at the easy
+#      attitudes and pays for it upside-down, which is the case a falling-cat
+#      robot arguably exists for. If that matters more than the mean, k=0.25 is
+#      the better pick and this vector is the wrong one.
+#
+# NOT yet validated on tail: no tail-variant run exists at these weights, so the
+# shared-vector claim is currently established on no-tail alone.
 PENALTY_WEIGHTS = {
-    #           torque      body omega   joint vel     simultaneity
-    "tail":   {"en": 0.646, "av": 0.00547, "jv": 0.000815, "time": 0.848},
-    "notail": {"en": 0.447, "av": 0.0,     "jv": 0.000633, "time": 0.271},
+    #        torque   body omega   joint vel   simultaneity
+    "tail":   {"en": 0.65, "av": 0.0055, "jv": 0.0008, "time": 0.85},
+    "notail": {"en": 0.65, "av": 0.0055, "jv": 0.0008, "time": 0.85},
 }
 
 init_ang_vel_max = 0.5  # rad/s, per-axis range for random initial tumble
 init_joint_pos_max = 0.2  # rad, per-joint range for random initial joint angles
-filter_alpha = 0.3  # action low-pass gain (1.0 = no filter, smaller = smoother)
 # --------------------------
 
 # ---- privileged (teacher-only) domain-randomization block ----
@@ -233,12 +234,6 @@ class CatEnv(MujocoEnv, EzPickle):
         else:
             executed_action = action.copy()
 
-        # First-order low-pass on the commanded (normalized) target: suppresses
-        # high-frequency action reversals / jitter and mirrors the hardware's
-        # actuator + PD low-pass. State persists across steps, reset per episode.
-        self.action_filt = filter_alpha * executed_action + (1.0 - filter_alpha) * self.action_filt
-        executed_action = self.action_filt.copy()
-
         # PD control
         roll_range = self.model.jnt_range[1][1]
         pitch_range = self.model.jnt_range[2][1]
@@ -372,9 +367,6 @@ class CatEnv(MujocoEnv, EzPickle):
         self.action_delay = np.random.randint(0, 3)
         zero_action = np.zeros(self.action_space.shape)
         self.action_buffer = [zero_action.copy() for _ in range(self.action_delay)]
-
-        # Action low-pass filter state (starts neutral)
-        self.action_filt = np.zeros(self.action_space.shape, dtype=np.float32)
 
         # Freeze this episode's draw as the privileged block of the observation.
         # Constant for the whole episode by construction -- the DR is resampled
