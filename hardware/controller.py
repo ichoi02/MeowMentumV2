@@ -540,6 +540,9 @@ def main():
         front.stop_all_motors()
         back.stop_all_motors()
         if log:
+            # If "telemetry" folder doesn't exist, create it
+            if not os.path.exists("telemetry"):
+                os.makedirs("telemetry")
             filename = f"telemetry/telemetry_{int(time.time())}.csv"
             print(f"Saving {len(log)} records to {filename}...")
             with open(filename, 'w', newline='') as f:
