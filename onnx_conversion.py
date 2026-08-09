@@ -22,12 +22,12 @@ class StudentPolicy(nn.Module):
         return self.net(x)
 
 # --- Configuration ---
-# Student obs = N_FRAMES stacked frames of [front_proj_grav(3) + joint_angles(4)].
-# Must match cat_env/cat_env.py + distillation.py (STUDENT_OBS_DIM = N_FRAMES * 7).
-N_FRAMES = 2
-FRAME_DIM = 3 + 4
-STATE_DIM = N_FRAMES * FRAME_DIM      # 14
-ACTION_DIM = 3
+# Student obs = [front_proj_grav(3), joint_angles(4), prev action(3), step(1)].
+# Imported rather than restated so the export width cannot drift from the student.
+from distillation import STUDENT_OBS_DIM, ACT_DIM
+
+STATE_DIM = STUDENT_OBS_DIM
+ACTION_DIM = ACT_DIM
 
 def main(variant="tail"):
     policy_dir()                    # policies/, created if missing

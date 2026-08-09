@@ -33,7 +33,7 @@ def baselines(recs):
         n = len(rs)
         out[v] = {
             "n_seeds": n,
-            "task": sum(r["r_pos"] + r["r_bonus"] for r in rs) / n,
+            "task": sum(r["r_pos"] for r in rs) / n,   # bonus removed from the reward
             "success": sum(r["success_pct"] for r in rs) / n,
             "success_spread": max(r["success_pct"] for r in rs) - min(r["success_pct"] for r in rs),
             **{t: sum(r[f"m_{t}"] for r in rs) / n for t in TERMS},

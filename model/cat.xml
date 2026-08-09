@@ -15,7 +15,11 @@
     <light directional="true" diffuse=".8 .8 .8" pos="0 0 10" dir="0 0 -1"/>
 
     <geom name="floor" type="plane" size="0 0 0.05" material="grey"/>
-    <body name="front_body" pos="0 0 3" euler="0 0 0">
+    <!-- Drop height 5 m: a 1.0 s free fall is 0.5*g*t^2 = 4.9 m, and the episode is
+         50 steps x 20 ms = 1.0 s (cat_env.max_steps). Contact is disabled, so this
+         does not change the dynamics -- it keeps the sim honest about the drop the
+         policy is being trained for, and keeps the viewer framing right. -->
+    <body name="front_body" pos="0 0 5" euler="0 0 0">
       <freejoint name="root"/>
       <!-- 663g body + 100g battery (TODO: measure battery mass) -->
       <inertial pos="0 0 0" mass="0.763" diaginertia="0.0012717 0.0012717 0.0012717"/>

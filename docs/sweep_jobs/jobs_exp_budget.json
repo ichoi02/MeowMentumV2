@@ -1,0 +1,158 @@
+[
+ {
+  "name": "pb003_s0_notail",
+  "variant": "notail",
+  "weights": {
+   "en": 0.03859,
+   "av": 0.002123,
+   "jv": 0.0003087,
+   "time": 0.0
+  },
+  "seed": 0,
+  "budget": 0.03,
+  "steps": 1000000
+ },
+ {
+  "name": "pb003_s0_tail",
+  "variant": "tail",
+  "weights": {
+   "en": 0.03859,
+   "av": 0.002123,
+   "jv": 0.0003087,
+   "time": 0.0
+  },
+  "seed": 0,
+  "budget": 0.03,
+  "steps": 1000000
+ },
+ {
+  "name": "pb006_s0_notail",
+  "variant": "notail",
+  "weights": {
+   "en": 0.07718,
+   "av": 0.004245,
+   "jv": 0.0006175,
+   "time": 0.0
+  },
+  "seed": 0,
+  "budget": 0.06,
+  "steps": 1000000
+ },
+ {
+  "name": "pb006_s0_tail",
+  "variant": "tail",
+  "weights": {
+   "en": 0.07718,
+   "av": 0.004245,
+   "jv": 0.0006175,
+   "time": 0.0
+  },
+  "seed": 0,
+  "budget": 0.06,
+  "steps": 1000000
+ },
+ {
+  "name": "pb012_s0_notail",
+  "variant": "notail",
+  "weights": {
+   "en": 0.1544,
+   "av": 0.00849,
+   "jv": 0.001235,
+   "time": 0.0
+  },
+  "seed": 0,
+  "budget": 0.12,
+  "steps": 1000000
+ },
+ {
+  "name": "pb012_s0_tail",
+  "variant": "tail",
+  "weights": {
+   "en": 0.1544,
+   "av": 0.00849,
+   "jv": 0.001235,
+   "time": 0.0
+  },
+  "seed": 0,
+  "budget": 0.12,
+  "steps": 1000000
+ },
+ {
+  "name": "pb018_s0_notail",
+  "variant": "notail",
+  "weights": {
+   "en": 0.2316,
+   "av": 0.01274,
+   "jv": 0.001852,
+   "time": 0.0
+  },
+  "seed": 0,
+  "budget": 0.18,
+  "steps": 1000000
+ },
+ {
+  "name": "pb018_s0_tail",
+  "variant": "tail",
+  "weights": {
+   "en": 0.2316,
+   "av": 0.01274,
+   "jv": 0.001852,
+   "time": 0.0
+  },
+  "seed": 0,
+  "budget": 0.18,
+  "steps": 1000000
+ },
+ {
+  "name": "pb024_s0_notail",
+  "variant": "notail",
+  "weights": {
+   "en": 0.3087,
+   "av": 0.01698,
+   "jv": 0.00247,
+   "time": 0.0
+  },
+  "seed": 0,
+  "budget": 0.24,
+  "steps": 1000000
+ },
+ {
+  "name": "pb024_s0_tail",
+  "variant": "tail",
+  "weights": {
+   "en": 0.3087,
+   "av": 0.01698,
+   "jv": 0.00247,
+   "time": 0.0
+  },
+  "seed": 0,
+  "budget": 0.24,
+  "steps": 1000000
+ },
+ {
+  "name": "pb036_s0_notail",
+  "variant": "notail",
+  "weights": {
+   "en": 0.4631,
+   "av": 0.02547,
+   "jv": 0.003705,
+   "time": 0.0
+  },
+  "seed": 0,
+  "budget": 0.36,
+  "steps": 1000000
+ },
+ {
+  "name": "pb036_s0_tail",
+  "variant": "tail",
+  "weights": {
+   "en": 0.4631,
+   "av": 0.02547,
+   "jv": 0.003705,
+   "time": 0.0
+  },
+  "seed": 0,
+  "budget": 0.36,
+  "steps": 1000000
+ }
+]

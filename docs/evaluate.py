@@ -25,8 +25,9 @@ from stable_baselines3 import SAC
 import cat_env  # noqa: F401  (registers Cat-v0 / CatNoTail-v0)
 from cat_env.cat_env import BASE_OBS_DIM
 from distillation import (
-    StudentPolicy, stack_frames, sample_sensor_bias, get_noisy_student_frame,
-    FRAME_DIM, JOINT_DIM, GRAV_DIM, N_FRAMES, FRONT_GRAV_SLICE, JOINT_ANGLE_SLICE,
+    StudentPolicy, build_student_obs, zero_tail, sample_sensor_bias,
+    get_noisy_student_frame, FRAME_DIM, JOINT_DIM, GRAV_DIM, ACT_DIM,
+    STUDENT_OBS_DIM, STEP_IDX, FRONT_GRAV_SLICE, JOINT_ANGLE_SLICE,
 )
 from variants import VARIANTS, teacher_path, student_path
 
@@ -44,8 +45,9 @@ MAGNITUDES = ("m_en", "m_av", "m_jv", "m_time")
 # -- but not comparable to it, since `m_sm` averaged over channels rather than
 # summing, and was recorded on the training-time (noisy) action.
 DET_SMOOTHNESS = "m_dsm"
-# Task terms, for scale: a penalty weight is "large" relative to these.
-TASK_TERMS = ("r_pos", "r_bonus")
+# Task term, for scale: a penalty weight is "large" relative to this. The success
+# bonus was removed from the reward, so r_pos is the whole task signal now.
+TASK_TERMS = ("r_pos",)
 
 def tilt_deg(env, body):
     """Angle between the body's +z and world +z, in degrees."""
@@ -79,7 +81,7 @@ def force_attitude(u, roll_deg, pitch_deg):
     u.set_state(qpos, qvel)
     return u._get_obs()
 
-def evaluate(variant="tail", agent="student", n_frames=N_FRAMES, episodes=200,
+def evaluate(variant="tail", agent="student", episodes=200,
              noisy=True, policy_path=None, seed=0, roll_deg=None, pitch_deg=None):
     cfg = VARIANTS[variant]
 
@@ -103,7 +105,7 @@ def evaluate(variant="tail", agent="student", n_frames=N_FRAMES, episodes=200,
 
     if agent != "teacher":
         path = policy_path or student_path(variant)
-        policy = StudentPolicy(n_frames * FRAME_DIM, env.action_space.shape[0])
+        policy = StudentPolicy(STUDENT_OBS_DIM, env.action_space.shape[0])
         policy.load_state_dict(torch.load(path, map_location="cpu"))
         policy.eval()
 
@@ -122,7 +124,7 @@ def evaluate(variant="tail", agent="student", n_frames=N_FRAMES, episodes=200,
         if fixed_attitude:
             obs = force_attitude(u, roll_deg, pitch_deg)
         bias = sample_sensor_bias() if noisy else no_bias
-        hist = None
+        prev_action = np.zeros(ACT_DIM)   # no command history at release
         done = False
         ep_abs, prev_q = [], u.data.qpos[7:].copy()
         ep_travel = np.zeros(4)
@@ -133,12 +135,15 @@ def evaluate(variant="tail", agent="student", n_frames=N_FRAMES, episodes=200,
                 action, _ = policy.predict(obs, deterministic=True)
             else:
                 frame = get_noisy_student_frame(obs, bias) if noisy else clean_frame(obs)
-                # Prefill the history with the first frame, matching controller.py.
-                hist = deque([frame] * n_frames, maxlen=n_frames) if hist is None else hist
-                hist.append(frame)
+                frame = zero_tail(frame, variant)
+                # Current frame + last commanded action + episode progress, matching
+                # distillation.py and hardware/controller.py.
+                x_np = build_student_obs(frame, prev_action, obs[STEP_IDX])
                 with torch.no_grad():
-                    x = torch.FloatTensor(stack_frames(list(hist))).unsqueeze(0)
-                    action = policy(x).squeeze(0).numpy()
+                    action = policy(torch.FloatTensor(x_np).unsqueeze(0)).squeeze(0).numpy()
+                if variant == "notail":
+                    action[2] = 0.0       # untrained channel, as the controller does
+                prev_action = np.asarray(action, dtype=float).copy()
 
             # Measured on the action as commanded, before env.step consumes it,
             # so it matches what smooth_sac.py penalizes.
@@ -188,8 +193,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--variant", choices=list(VARIANTS), default="tail")
     parser.add_argument("--agent", choices=["student", "teacher"], default="student")
-    parser.add_argument("--frames", type=int, default=N_FRAMES,
-                        help=f"stacked student frames (default: {N_FRAMES})")
     parser.add_argument("--episodes", type=int, default=200)
     parser.add_argument("--policy", default=None, help="explicit policy file to load")
     parser.add_argument("--clean", action="store_true",
@@ -208,7 +211,7 @@ def main():
                              "combine with --roll to set both")
     args = parser.parse_args()
 
-    res = evaluate(args.variant, args.agent, args.frames, args.episodes,
+    res = evaluate(args.variant, args.agent, args.episodes,
                    noisy=not args.clean, policy_path=args.policy, seed=args.seed,
                    roll_deg=args.roll, pitch_deg=args.pitch)
 
@@ -217,8 +220,6 @@ def main():
         return
 
     label = f"{args.variant}/{args.agent}"
-    if args.agent == "student":
-        label += f" f{args.frames}"
     label += " (clean)" if args.clean else " (noisy)"
     if res["roll_deg"] is not None or res["pitch_deg"] is not None:
         label += f" [roll {res['roll_deg'] or 0:+.0f} pitch {res['pitch_deg'] or 0:+.0f}]"

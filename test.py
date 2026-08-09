@@ -10,8 +10,8 @@ from scipy.spatial.transform import Rotation as R
 import cat_env
 from cat_env.cat_env import BASE_OBS_DIM
 from distillation import (
-    StudentPolicy, stack_frames, STUDENT_OBS_DIM, N_FRAMES,
-    FRONT_GRAV_SLICE, JOINT_ANGLE_SLICE,
+    StudentPolicy, build_student_obs, zero_tail, STUDENT_OBS_DIM, ACT_DIM,
+    STEP_IDX, FRONT_GRAV_SLICE, JOINT_ANGLE_SLICE,
 )
 from variants import VARIANTS, teacher_path, student_path
 
@@ -73,7 +73,7 @@ def visualize(variant="tail", agent="student", roll_deg=None, still=False,
     obs, _ = env.reset()
     if roll_deg is not None or still:
         obs = force_release(env, roll_deg, still)
-    frame_hist = deque([student_frame(obs)] * N_FRAMES, maxlen=N_FRAMES)  # oldest -> newest
+    prev_action = np.zeros(ACT_DIM)   # no command history at release
 
     mj_model = env.unwrapped.model
     mj_data = env.unwrapped.data
@@ -99,18 +99,21 @@ def visualize(variant="tail", agent="student", roll_deg=None, still=False,
                 if agent == 'teacher':
                     action, _ = teacher.predict(obs, deterministic=True)
                 elif agent == 'student':
-                    frame_hist.append(student_frame(obs))
-                    student_obs = stack_frames(list(frame_hist))
+                    frame = zero_tail(student_frame(obs), variant)
+                    student_obs = build_student_obs(frame, prev_action, obs[STEP_IDX])
                     with torch.no_grad():
                         obs_tensor = torch.FloatTensor(student_obs).unsqueeze(0)
                         action = student(obs_tensor).squeeze(0).numpy()
+                    if variant == "notail":
+                        action[2] = 0.0    # untrained channel, as the controller does
+                    prev_action = np.asarray(action, dtype=float).copy()
                 obs, reward, terminated, truncated, info = env.step(action)
 
                 if terminated or truncated:
                     obs, _ = env.reset()
                     if roll_deg is not None or still:
                         obs = force_release(env, roll_deg, still)
-                    frame_hist = deque([student_frame(obs)] * N_FRAMES, maxlen=N_FRAMES)
+                    prev_action = np.zeros(ACT_DIM)
                 
                 viewer.sync()
                 

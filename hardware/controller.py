@@ -43,7 +43,6 @@ import argparse
 import numpy as np
 import csv
 import threading
-from collections import deque
 import cat_env.env_util as util
 from variants import VARIANTS, onnx_path
 import socket
@@ -55,11 +54,19 @@ SN_BACK  = "18452630"
 BAUD_RATE = 115200
 LOOP_HZ = 50
 
-CONTROL_DURATION = 0.74   # sim episode: 37 steps x (1/50 s) = 0.74 s
+CONTROL_DURATION = 1.0    # sim episode: 50 steps x (1/50 s) = 1.0 s
 
 # --- Policy / sim-matching parameters (MUST match cat_env/cat_env.py + model/cat.xml) ---
-N_FRAMES = 2              # stacked student frames  (distillation.N_FRAMES)
 GRAV_DIM = 3
+JOINT_DIM = 4
+ACT_DIM = 3
+STUDENT_OBS_DIM = GRAV_DIM + JOINT_DIM + ACT_DIM + 1   # 11 (distillation.STUDENT_OBS_DIM)
+MAX_STEPS = 50            # cat_env.max_steps; CONTROL_DURATION / (1/LOOP_HZ)
+
+# Per-channel action low-pass, [roll, pitch, tail]. MUST equal cat_env.filter_alpha:
+# the policy is trained against this filter, so a mismatch changes the plant it acts on.
+FILTER_ALPHA = np.array([0.1, 0.3, 0.1])
+
 # Joint target ranges (rad), from model/cat.xml jnt_range:
 ROLL_RANGE = 7.28         # rot1 / rot2   (+/-417 deg)
 PITCH_RANGE = 1.57        # pitch         (+/-90 deg)
@@ -68,16 +75,28 @@ TAIL_RANGE = 1.9199       # tail          (+/-110 deg)
 # Bound serial draining per tick (~50Hz telemetry per board); unbounded reads starve the Python loop.
 SERIAL_DRAIN_MAX_LINES = 32
 
-def stack_frames(frames):
-    """Newest frame plus successive backward differences, grouped by feature type.
-    For N=2: [grav(3), d_grav(3), joints(4), d_joints(4)].
-    MUST match distillation.stack_frames exactly."""
-    seq = list(frames)                                    # oldest -> newest
-    deltas = [seq[i] - seq[i - 1] for i in range(len(seq) - 1, 0, -1)]
-    parts = [seq[-1]] + deltas
-    gravs = [p[:GRAV_DIM] for p in parts]
-    joints = [p[GRAV_DIM:] for p in parts]
-    return np.concatenate(gravs + joints)
+def build_student_obs(frame, prev_action, step_frac):
+    """[grav(3), joints(4)] + prev action(3) + step(1) -> the 11-dim student input.
+    MUST match distillation.build_student_obs exactly."""
+    return np.concatenate([frame, np.asarray(prev_action, dtype=float).ravel(),
+                           [float(step_frac)]])
+
+
+def zero_tail(frame, variant):
+    """No-tail variant: force the tail joint reading to 0.
+
+    `cat_notail.xml` keeps the tail joint but starves its motor to ctrlrange +-1e-6, so
+    the tail never moves in training and the policy's third output gets no gradient.
+    This controller drives a real +-110 deg tail motor from that same output, which put
+    the tail observation 76% outside the distribution the student was distilled on
+    (telemetry/sim2real.ipynb). The action is zeroed too, below -- commanding 0 makes
+    the Teensy PD actively HOLD the tail at zero, where simply not driving it would let
+    it swing under the tumble and read nonzero anyway.
+    """
+    if variant == "notail":
+        frame = np.asarray(frame, dtype=float).copy()
+        frame[GRAV_DIM + 3] = 0.0        # joints are [rot1, pitch, rot2, tail]
+    return frame
 
 # Teleplot
 # UDP_IP = "127.0.0.1" 
@@ -401,13 +420,14 @@ def main():
         input_name = ort_session.get_inputs()[0].name
 
         # Fail loudly here rather than on the first inference mid-drop: a policy
-        # exported with a different N_FRAMES has a different input width.
+        # exported against the old stacked observation has a different input width.
         onnx_dim = ort_session.get_inputs()[0].shape[-1]
-        expected = N_FRAMES * (GRAV_DIM + 4)
-        if onnx_dim != expected:
+        if onnx_dim != STUDENT_OBS_DIM:
             raise ValueError(
                 f"{os.path.basename(onnx_path)} expects {onnx_dim}-dim input but this "
-                f"controller builds {expected} (N_FRAMES={N_FRAMES}). Re-export or fix N_FRAMES.")
+                f"controller builds {STUDENT_OBS_DIM} "
+                f"[grav {GRAV_DIM} | joints {JOINT_DIM} | prev action {ACT_DIM} | step 1]. "
+                f"Re-export the student, or you are flying a pre-redesign policy.")
 
     if not args.motoroff:
         front.start_all_motors()
@@ -448,9 +468,11 @@ def main():
 
     print(f"Starting loop at {LOOP_HZ}Hz. Press Ctrl+C to quit.")
 
-    # Student temporal state (reset per drop). Matches cat_env reset: the frame
-    # history is prefilled with the first frame on the first tick.
-    frame_hist = deque(maxlen=N_FRAMES)
+    # Student temporal state (reset per drop), matching cat_env.reset_model: no command
+    # history at release, so both the previous action and the filter start neutral.
+    prev_action = np.zeros(ACT_DIM)
+    action_filt = np.zeros(ACT_DIM)
+    step_i = 0
 
     try:
         while(True):
@@ -470,26 +492,32 @@ def main():
                 front_grav = util.to_projected_gravity(front.quat)
                 # Joint angles in sim order [rot1, pitch, rot2, tail].
                 joints = np.array([front.m1_rad, front.m2_rad, back.m2_rad, back.m1_rad])
-                frame = np.concatenate([front_grav, joints])   # 3 + 4 = 7
+                frame = zero_tail(np.concatenate([front_grav, joints]), args.variant)
 
-                # Maintain N_FRAMES history; prefill with the first frame on tick 0.
-                if len(frame_hist) == 0:
-                    for _ in range(N_FRAMES):
-                        frame_hist.append(frame)
-                else:
-                    frame_hist.append(frame)
-
-                obs = stack_frames(list(frame_hist))            # N_FRAMES x 7 = 14-dim
+                # Current frame + the action commanded last tick + episode progress.
+                obs = build_student_obs(frame, prev_action, min(step_i / MAX_STEPS, 1.0))
                 obs_tensor = np.array(obs, dtype=np.float32).reshape(1, -1)
+                step_i += 1
 
                 # Run ONNX inference -> normalized action in [-1, 1].
                 raw_action = ort_session.run(None, {input_name: obs_tensor})[0][0]
+                raw_action = np.clip(np.asarray(raw_action, dtype=float), -1.0, 1.0)
+                if args.variant == "notail":
+                    raw_action[2] = 0.0     # untrained channel; hold the tail at zero
+
+                # The observation carries the policy's RAW output, not the filtered one:
+                # cat_env stores prev_action before filtering, so this must match.
+                prev_action = raw_action.copy()
+
+                # Per-channel low-pass, then map to joint targets. Both stages mirror
+                # cat_env.step exactly, in the same order.
+                action_filt = FILTER_ALPHA * raw_action + (1.0 - FILTER_ALPHA) * action_filt
 
                 # Map normalized action -> joint target angles (rad), using the sim
                 # jnt_range from model/cat.xml. rot2 mirrors rot1 (rot2 = -rot1).
-                roll  = util.map_value(float(raw_action[0]), -1, 1, -ROLL_RANGE, ROLL_RANGE)
-                pitch = util.map_value(float(raw_action[1]), -1, 1, -PITCH_RANGE, PITCH_RANGE)
-                tail  = util.map_value(float(raw_action[2]), -1, 1, -TAIL_RANGE, TAIL_RANGE)
+                roll  = util.map_value(float(action_filt[0]), -1, 1, -ROLL_RANGE, ROLL_RANGE)
+                pitch = util.map_value(float(action_filt[1]), -1, 1, -PITCH_RANGE, PITCH_RANGE)
+                tail  = util.map_value(float(action_filt[2]), -1, 1, -TAIL_RANGE, TAIL_RANGE)
                 action = [roll, pitch, tail, -roll]
 
             front.set_motors(action[0], action[1])

@@ -2,8 +2,8 @@
 End-to-end hardware-pipeline test (no physical hardware required).
 
 Drives the MuJoCo Cat-v0 sim as the "physical robot" and runs the ACTUAL
-hardware inference pipeline from controller.py (projected-gravity obs, 4-frame
-stacking, ONNX inference, joint-range mapping). Verifies
+hardware inference pipeline from controller.py (projected-gravity obs, previous
+action + step, ONNX inference, action low-pass, joint-range mapping). Verifies
 each stage matches the simulation/training pipeline, then confirms closed-loop
 righting.
 
@@ -16,7 +16,6 @@ Run from the repo root:  python hardware/e2e_test.py
 import os
 import sys
 import time
-from collections import deque
 
 import numpy as np
 import torch
@@ -30,7 +29,7 @@ sys.path.insert(0, os.path.join(REPO, "hardware"))
 import gymnasium as gym
 import cat_env  # noqa: F401  (registers Cat-v0 / CatNoTail-v0)
 import distillation as D
-import controller as C  # the real hardware controller (constants + stack_frames + util)
+import controller as C  # the real hardware controller (constants + obs builder + util)
 from variants import VARIANTS, student_path, onnx_path
 
 # Floor for the closed-loop check. This is a pipeline-breakage tripwire, not a
@@ -75,7 +74,7 @@ def main(variant="tail"):
     PTH_FILE = student_path(variant)
 
     print(f"variant={variant}  env={cfg['env_id']}  onnx={os.path.basename(ONNX_FILE)}")
-    print(f"N_FRAMES={C.N_FRAMES}  "
+    print(f"obs={C.STUDENT_OBS_DIM}-dim  filter_alpha={C.FILTER_ALPHA}  "
           f"ranges(roll/pitch/tail)={C.ROLL_RANGE}/{C.PITCH_RANGE}/{C.TAIL_RANGE}")
 
     sess = ort.InferenceSession(ONNX_FILE)
@@ -83,13 +82,25 @@ def main(variant="tail"):
     onnx_dim = sess.get_inputs()[0].shape[-1]
 
     student = D.StudentPolicy(D.STUDENT_OBS_DIM, 3)
-    student.load_state_dict(torch.load(PTH_FILE, map_location="cpu"))
+    try:
+        student.load_state_dict(torch.load(PTH_FILE, map_location="cpu"))
+    except RuntimeError as e:
+        # Almost always a stale artifact rather than a real bug: the observation
+        # layout changed and this .pth predates it. Say so instead of dumping a
+        # size-mismatch traceback.
+        check("student checkpoint matches current obs layout", False,
+              f"{os.path.basename(PTH_FILE)} was built for a different observation "
+              f"width (expected {D.STUDENT_OBS_DIM}). Re-run distillation.py and "
+              f"onnx_conversion.py for --variant {variant}.")
+        print("\n=== SUMMARY ===")
+        print(f"{sum(results)}/{len(results)} checks passed")
+        sys.exit(1)
     student.eval()
 
     # ---- TEST 0: dimensions line up across the whole chain ----
     check(f"dims consistent (controller/distill/onnx = {D.STUDENT_OBS_DIM})",
-          C.N_FRAMES * D.FRAME_DIM == D.STUDENT_OBS_DIM == onnx_dim,
-          f"ctrl={C.N_FRAMES*D.FRAME_DIM} distill={D.STUDENT_OBS_DIM} onnx={onnx_dim}")
+          C.STUDENT_OBS_DIM == D.STUDENT_OBS_DIM == onnx_dim,
+          f"ctrl={C.STUDENT_OBS_DIM} distill={D.STUDENT_OBS_DIM} onnx={onnx_dim}")
 
     # ---- TEST 1: ONNX == PyTorch student ----
     X = np.random.randn(1000, D.STUDENT_OBS_DIM).astype(np.float32)
@@ -104,28 +115,27 @@ def main(variant="tail"):
 
     # ---- TEST 2: controller obs-build == sim student obs (over a rollout) ----
     obs, _ = env.reset()
-    ctrl_hist = deque(maxlen=C.N_FRAMES)
-    sim_hist = deque(maxlen=D.N_FRAMES)
+    prev_c = np.zeros(C.ACT_DIM)
+    prev_s = np.zeros(D.ACT_DIM)
+    step_i = 0
     maxdiff2 = 0.0
     for _ in range(300):
         fq, jt = emulate_sensors(u)
-        cf = controller_frame(fq, jt)
-        sf = sim_student_frame(obs)
-        for hist, frame in ((ctrl_hist, cf), (sim_hist, sf)):
-            if len(hist) == 0:
-                for _ in range(hist.maxlen):
-                    hist.append(frame)
-            else:
-                hist.append(frame)
-        ctrl_obs = C.stack_frames(list(ctrl_hist))
-        sim_obs = D.stack_frames(list(sim_hist))
+        cf = C.zero_tail(controller_frame(fq, jt), variant)
+        sf = D.zero_tail(sim_student_frame(obs), variant)
+        ctrl_obs = C.build_student_obs(cf, prev_c, min(step_i / C.MAX_STEPS, 1.0))
+        sim_obs = D.build_student_obs(sf, prev_s, obs[D.STEP_IDX])
         maxdiff2 = max(maxdiff2, float(np.max(np.abs(ctrl_obs - sim_obs))))
         raw = sess.run(None, {inp: ctrl_obs.astype(np.float32).reshape(1, -1)})[0][0]
+        raw = np.clip(raw, -1, 1)
+        if variant == "notail":
+            raw[2] = 0.0
+        prev_c = raw.copy(); prev_s = raw.copy()
+        step_i += 1
         obs, _, term, trunc, _ = env.step(raw)
         if term or trunc:
             obs, _ = env.reset()
-            ctrl_hist.clear()
-            sim_hist.clear()
+            prev_c = np.zeros(C.ACT_DIM); prev_s = np.zeros(D.ACT_DIM); step_i = 0
     check("controller obs == sim student obs", maxdiff2 < 1e-6, f"max|diff|={maxdiff2:.2e}")
 
     # ---- TEST 3: controller map == sim internal executed target ----
@@ -134,14 +144,17 @@ def main(variant="tail"):
     u.action_delay = 0
     u.action_buffer = []
     rng = np.random.default_rng(0)
+    c_filt = np.zeros(3)
     maxdiff3 = 0.0
     n_cmp = 0
     for _ in range(300):
         raw = rng.uniform(-1, 1, 3).astype(np.float32)
+        # Controller path: per-channel low-pass, then the joint-range map.
+        c_filt = C.FILTER_ALPHA * raw + (1.0 - C.FILTER_ALPHA) * c_filt
         c_targets = np.array([
-            C.util.map_value(float(raw[0]), -1, 1, -C.ROLL_RANGE, C.ROLL_RANGE),
-            C.util.map_value(float(raw[1]), -1, 1, -C.PITCH_RANGE, C.PITCH_RANGE),
-            C.util.map_value(float(raw[2]), -1, 1, -C.TAIL_RANGE, C.TAIL_RANGE),
+            C.util.map_value(float(c_filt[0]), -1, 1, -C.ROLL_RANGE, C.ROLL_RANGE),
+            C.util.map_value(float(c_filt[1]), -1, 1, -C.PITCH_RANGE, C.PITCH_RANGE),
+            C.util.map_value(float(c_filt[2]), -1, 1, -C.TAIL_RANGE, C.TAIL_RANGE),
         ])
         obs, _, term, trunc, _ = env.step(raw)
         if not (term or trunc):
@@ -152,7 +165,8 @@ def main(variant="tail"):
             obs, _ = env.reset()
             u.action_delay = 0
             u.action_buffer = []
-    check("controller map == sim executed target", maxdiff3 < 1e-6,
+            c_filt = np.zeros(3)          # cat_env resets its filter per episode
+    check("controller filter+map == sim executed target", maxdiff3 < 1e-6,
           f"max|diff|={maxdiff3:.2e} over {n_cmp} steps")
 
     # ---- TEST 4: closed-loop righting through the full hardware pipeline ----
@@ -163,20 +177,22 @@ def main(variant="tail"):
     infer_times = []
     for _ in range(N):
         obs, _ = env.reset()
-        ctrl_hist = deque(maxlen=C.N_FRAMES)
+        prev_c = np.zeros(C.ACT_DIM)
+        step_i = 0
         done = False
         while not done:
             fq, jt = emulate_sensors(u)
-            cf = controller_frame(fq, jt)
-            if len(ctrl_hist) == 0:
-                for _ in range(C.N_FRAMES):
-                    ctrl_hist.append(cf)
-            else:
-                ctrl_hist.append(cf)
-            x = C.stack_frames(list(ctrl_hist)).astype(np.float32).reshape(1, -1)
+            cf = C.zero_tail(controller_frame(fq, jt), variant)
+            x = C.build_student_obs(cf, prev_c, min(step_i / C.MAX_STEPS, 1.0))
+            x = x.astype(np.float32).reshape(1, -1)
             t0 = time.perf_counter()
             raw = sess.run(None, {inp: x})[0][0]
             infer_times.append((time.perf_counter() - t0) * 1e3)
+            raw = np.clip(raw, -1, 1)
+            if variant == "notail":
+                raw[2] = 0.0
+            prev_c = raw.copy()
+            step_i += 1
             obs, _, term, trunc, _ = env.step(raw)
             done = term or trunc
         fa, ra = tilt_deg(u, "front_body"), tilt_deg(u, "rear_body")

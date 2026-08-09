@@ -13,8 +13,13 @@ class TensorboardRewardCallback(BaseCallback):
         super().__init__(verbose)
 
     # r_sm is gone: action smoothness is an actor-loss term now, logged by
-    # SmoothSAC as train/smooth_loss rather than by the env.
-    TERMS = ("r_pos", "r_bonus", "r_en", "r_av", "r_jv", "r_time", "up_mean")
+    # SmoothSAC as train/smooth_loss rather than by the env. r_bonus is gone too:
+    # the success bonus was removed from the reward (cat_env.py).
+    #
+    # record_mean, not record: `record` overwrites, so a dumped value was whichever
+    # step happened to land last in the logging interval -- a single sample presented
+    # as if it were an episode statistic, which made cross-run comparisons unreliable.
+    TERMS = ("r_pos", "r_en", "r_av", "r_jv", "r_time", "up_mean")
 
     def _on_step(self) -> bool:
         # locals["infos"] is a list of info dictionaries from the vectorized environments
@@ -22,12 +27,12 @@ class TensorboardRewardCallback(BaseCallback):
             if "r_pos" in info:
                 # Log each term under a "rewards/" group in TensorBoard
                 for term in self.TERMS:
-                    self.logger.record(f"rewards/{term}", info[term])
+                    self.logger.record_mean(f"rewards/{term}", info[term])
         return True
 
 def train(variant="tail", total_timesteps=1_000_000, tag="", n_envs=10, seed=None,
           out=None, gradient_steps=1, run_name=None, privileged=True,
-          smooth_coef=10.0):
+          smooth_coef=2.0):
     cfg = VARIANTS[variant]
 
     env = make_vec_env(
@@ -95,7 +100,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-privileged", action="store_true",
                         help="train on the 25-dim obs without the DR block "
                              "(control arm for whether the privileged block helps)")
-    parser.add_argument("--smooth-coef", type=float, default=10.0,
+    parser.add_argument("--smooth-coef", type=float, default=2.0,
                         help="weight on the L2 action-smoothness term in the actor "
                              "loss (default: 10.0; 0 disables it, and train/smooth_loss "
                              "is still logged so the ablation is readable)")

@@ -13,10 +13,23 @@ def _w(name, default):
     """Reward weight, overridable as CAT_W_<NAME> so a sweep needs no code edit."""
     return float(os.environ.get(f"CAT_W_{name}", default))
 
-# Task terms.
-w_pos = _w("POS", 1.0)      # uprightness reward weight
-w_bonus = _w("BONUS", 1.0)  # bonus when BOTH bodies are upright (up_f, up_r > up_thresh)
-up_thresh = 0.95  # per-body uprightness threshold for the success bonus (~26 deg tilt)
+# Task terms. There is only one: the success BONUS was removed.
+#
+# It was `w_bonus * 1[both bodies > up_thresh]`, a step at 25.8 deg of tilt -- stricter
+# than the 30 deg that `docs/evaluate.py` actually scores success at, so a policy could
+# succeed by the reported metric while never earning the term meant to encourage it.
+# Worse, it was badly morphology-biased: measured over 200 episodes it fired on 19.3% of
+# tail steps but 5.8% of no-tail steps against a 4.5% PASSIVE rate -- i.e. for no-tail it
+# was statistically indistinguishable from doing nothing, so it carried no gradient for
+# the arm that needed it. Removing it cuts the tail:no-tail asymmetry in task-reward gain
+# from 2.15x to 1.82x.
+#
+# w_pos is 1.5 rather than 1.0 to restore scale, not to change the balance: dropping the
+# bonus and linearising `up` (see _get_reward) together cut no-tail's reward gain over a
+# passive policy from 0.347/step to 0.248, and 1.4-1.6x puts it back. The penalty weights
+# below are sized against task reward, so leaving w_pos at 1.0 would have quietly made
+# every penalty ~40% more expensive.
+w_pos = _w("POS", 1.5)      # uprightness reward weight
 
 # Penalty terms, SHARED BY BOTH VARIANTS. Every one trades directly against w_pos:
 # set too high, a variant that cannot *reliably* right itself scores better holding
@@ -54,16 +67,79 @@ up_thresh = 0.95  # per-body uprightness threshold for the success bonus (~26 de
 #      robot arguably exists for. If that matters more than the mean, k=0.25 is
 #      the better pick and this vector is the wrong one.
 #
-# NOT yet validated on tail: no tail-variant run exists at these weights, so the
-# shared-vector claim is currently established on no-tail alone.
+# `w_time` IS NOW ZERO for both variants. The simultaneity term is computed on the
+# RAW action (`d_action` in _get_reward), but the per-channel low-pass above now sits
+# between that action and the plant, so raw action rate no longer corresponds to
+# physical joint motion -- the filter absorbs it. The term was therefore pricing a
+# quantity the robot does not feel. The tell showed up immediately on the first
+# filtered teachers: no-tail's `r_time` reached 0.531/step, ~31% of its task reward
+# and 10x the tail's, against ~0.01 on every pre-filter run. Whatever the policy was
+# buying with that spend, it was not smoother hardware motion.
+#
+# If simultaneity is wanted back, price it on something the filter cannot absorb --
+# joint velocity products from `self.data.qvel[6:]` rather than action differences.
+#
+# CURRENT VECTOR: the 3% budget under the exponential pose reward. Re-sized from
+# scratch against that reward's own measured penalty-free baseline (m_en, m_av, m_jv
+# and r_pos over 3 seeds), not carried over -- carrying a vector across a reward change
+# is what previously left it costing 12% of task reward when it had been tuned for 43%.
+#
+# 26 runs, 1M steps each, evaluated on roll 180/90/45/0 x 300 drops at held-out seed
+# 4242 (docs/exp_budget_runs.jsonl). Budget ladder, delta vs penalty-free:
+#
+#   budget     3%     6%    12%    18%    24%    36%
+#   tail    + 6.3  + 5.0  + 2.9  - 0.5  - 6.5  - 9.5
+#   notail  - 3.8  - 4.6  - 5.8  - 7.8  - 3.2  - 3.2
+#
+# NO budget is free. No-tail is degraded at every point, and the damage is NOT
+# proportional to the budget -- 3% costs 3.8 pp and 36% costs 3.2 pp -- so this is a
+# fixed cost of having any penalty at all, not a scale that can be tuned down. 3% is
+# chosen as the cheapest point that still prices torque, joint velocity and body
+# rotation at all; those terms exist for hardware transfer, not for sim score, and
+# penalty-free would leave the commanded trajectory unconstrained.
+#
+# Two things not to over-read:
+#   1. The tail row is single-seed. Penalty-free tail spans 53.7 / 58.7 / 68.8 across
+#      three seeds -- a 15.2 pp spread -- so every tail number above sits inside seed
+#      noise, INCLUDING the +6.3 that makes 3% look best. No-tail is the trustworthy
+#      arm here: its penalty-free spread is 2.0 pp.
+#   2. Inverted righting is nearly gone for no-tail under this reward: roll 180 is
+#      4.9% penalty-free and 0.7% here. It was 2.0% under cos+bonus. That is the case
+#      a falling-cat robot exists for, and no configuration measured so far solves it.
 PENALTY_WEIGHTS = {
-    #        torque   body omega   joint vel   simultaneity
-    "tail":   {"en": 0.65, "av": 0.0055, "jv": 0.0008, "time": 0.85},
-    "notail": {"en": 0.65, "av": 0.0055, "jv": 0.0008, "time": 0.85},
+    #        torque      body omega    joint vel      simultaneity
+    "tail":   {"en": 0.03859, "av": 0.002123, "jv": 0.0003087, "time": 0.0},
+    "notail": {"en": 0.03859, "av": 0.002123, "jv": 0.0003087, "time": 0.0},
 }
 
 init_ang_vel_max = 0.5  # rad/s, per-axis range for random initial tumble
 init_joint_pos_max = 0.2  # rad, per-joint range for random initial joint angles
+init_pitch_max_deg = 45.0  # deg, release pitch range (roll is full; yaw is irrelevant)
+
+# Per-channel first-order low-pass on the NORMALIZED action, applied before the
+# joint-range mapping. Order matches the action vector: [roll, pitch, tail].
+#
+# Sized against measured hardware, not chosen by feel. Over 7 logged drops the
+# unfiltered policy commanded 69 rad of roll travel per 0.74 s episode while the joint
+# physically delivered 6.9 -- a factor of 10. One alpha cannot fix that without
+# over-damping pitch: roll runs +-7.28 rad through 9.68:1 gearing, pitch +-1.57 rad
+# through 34:1, so in range-units roll is far slower. Applying each candidate alpha to
+# the logged action sequence gives commanded/achievable travel of:
+#
+#         alpha    roll     pitch
+#         1.00     10.0x     2.1x     (what actually flew)
+#         0.30      4.0x     0.9x
+#         0.10      1.7x     0.5x
+#
+# Hence 0.3 on pitch and 0.1 on roll/tail. Tail follows roll rather than pitch because
+# it shares pitch's gearing but a wider range, and because on the no-tail variant it is
+# zeroed outright (see hardware/controller.py).
+#
+# This is state: it persists across steps within an episode and resets per episode, so
+# the plant the policy acts on is no longer memoryless. The student observation carries
+# the previous action for exactly this reason (distillation.py) -- without it the
+# filter state is unobservable and the student's problem stops being Markov.
+filter_alpha = np.array([0.1, 0.3, 0.1])  # [roll, pitch, tail]
 # --------------------------
 
 # ---- privileged (teacher-only) domain-randomization block ----
@@ -92,7 +168,7 @@ init_joint_pos_max = 0.2  # rad, per-joint range for random initial joint angles
 # with 1e-3-scale variation (armature is 1.5e-4 Nm.s^2 nominal), which the first
 # layer resolves about as poorly as it resolves the frame differences the student
 # stacker exists to avoid.
-DR_DIM = 48
+DR_DIM = 48 # domain randomization vector width, teacher-only; see above
 BASE_OBS_DIM = 25
 
 
@@ -166,7 +242,12 @@ class CatEnv(MujocoEnv, EzPickle):
 
         # Initialize variables
         self.steps = 0
-        self.max_steps = 37
+        # 50 steps x 20 ms = 1.0 s. Raised from 37 (0.74 s) because the drop was
+        # ending mid-manoeuvre: released inverted, the no-tail teacher was still
+        # righting at 119 deg/s when the episode was truncated, finishing at 50 deg
+        # against a 30 deg threshold -- it needed roughly another 0.17 s. This is a
+        # taller drop, so hardware/controller.py::CONTROL_DURATION moves with it.
+        self.max_steps = 50
         self.prev_action = np.zeros(self.action_space.shape, dtype=np.float32)
 
         # Per-joint PD gains. Order: [rot1, pitch, rot2, tail].
@@ -233,6 +314,14 @@ class CatEnv(MujocoEnv, EzPickle):
             executed_action = self.action_buffer.pop(0)
         else:
             executed_action = action.copy()
+
+        # Per-channel low-pass on the commanded (normalized) target. Applied AFTER the
+        # delay buffer so the filter sees the action in the order the plant does, and
+        # BEFORE the range mapping so alpha is expressed in normalized units and does
+        # not silently change meaning if a joint range is edited.
+        self.action_filt = (filter_alpha * executed_action
+                            + (1.0 - filter_alpha) * self.action_filt)
+        executed_action = self.action_filt.copy()
 
         # PD control
         roll_range = self.model.jnt_range[1][1]
@@ -368,6 +457,10 @@ class CatEnv(MujocoEnv, EzPickle):
         zero_action = np.zeros(self.action_space.shape)
         self.action_buffer = [zero_action.copy() for _ in range(self.action_delay)]
 
+        # Action low-pass state, neutral at release (the robot is dropped with its
+        # joints wherever they were, but with no command history).
+        self.action_filt = np.zeros(self.action_space.shape, dtype=np.float64)
+
         # Freeze this episode's draw as the privileged block of the observation.
         # Constant for the whole episode by construction -- the DR is resampled
         # only here -- so the teacher reads the same 48 numbers every step.
@@ -387,11 +480,21 @@ class CatEnv(MujocoEnv, EzPickle):
         qpos = self.init_qpos.copy()
         qvel = self.init_qvel.copy()
 
-        # Randomize initial orientation. Policy and reward are yaw-invariant, so we
-        # sample a uniformly random attitude (SO(3)): full roll/pitch coverage, with
-        # heading a free dimension. The robot may be dropped in any orientation.
-        r = R.random()
-        quat_xyzw = r.as_quat()
+        # Randomize initial orientation: FULL roll, but pitch only within +-45 deg.
+        #
+        # This is the release the robot is actually given -- held by hand, rolled to
+        # some angle about its long axis, and let go roughly level fore-aft. A uniform
+        # SO(3) draw (the previous behaviour) spends most of its mass on nose-up /
+        # nose-down attitudes that never occur in a drop test, so the policy was
+        # spending capacity on a distribution it is never evaluated or deployed in.
+        #
+        # Yaw is fixed at 0 rather than sampled: the observation is projected gravity
+        # and the reward is a tilt angle, both invariant to heading, so a yaw draw adds
+        # nothing but variance. Euler order matches docs/evaluate.py::force_attitude,
+        # so `--roll X` there lands exactly on this distribution.
+        roll_deg = np.random.uniform(-180.0, 180.0)
+        pitch_deg = np.random.uniform(-init_pitch_max_deg, init_pitch_max_deg)
+        quat_xyzw = R.from_euler("xyz", [roll_deg, pitch_deg, 0.0], degrees=True).as_quat()
         qpos[3:7] = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]
 
         # Randomize initial angular velocity: the robot is dropped already tumbling.
@@ -476,18 +579,44 @@ class CatEnv(MujocoEnv, EzPickle):
         front_up = R.from_quat(front_quat, scalar_first=True).apply([0, 0, 1])
         rear_up = R.from_quat(rear_quat, scalar_first=True).apply([0, 0, 1])
 
-        # Per-body uprightness in [0, 1] (up[2] = cos(tilt); 1 = perfectly upright).
-        up_f = 0.5 * (front_up[2] + 1.0)
-        up_r = 0.5 * (rear_up[2] + 1.0)
+        # Per-body uprightness, LINEAR in tilt angle: 1 at upright, 0 at inverted, with
+        # a constant gradient of 1/pi everywhere.
+        #
+        # The clip is load-bearing: `apply` routinely returns 1.0 + 1e-16, and arccos
+        # of that is NaN, which would silently poison a whole episode's reward.
+        #
+        # Shapes measured, teacher mean success over roll 180/90/45/0, 300 drops each at
+        # held-out seed 4242, all under the OLD uniform-SO(3) release (tail / no-tail):
+        #
+        #   0.5*(cos(tilt)+1) + step bonus, penalties on   63.5% / 35.8%
+        #   1 - tilt/pi, no bonus, penalties on            47.8% / 32.3%
+        #   1 - tilt/pi, no bonus, penalties OFF           56.6% / 36.9%
+        #   exp(-tilt), no bonus, penalties OFF (3 seeds)  60.4% / 39.2%
+        #   exp(-tilt), no bonus, 3% budget                66.7% / 35.3%
+        #
+        # Gradient is what distinguishes them. cos gives 0.5*sin(tilt), which VANISHES at
+        # both ends (0.04 at 5 deg and at 175 deg, against 0.50 at 90 deg) -- flattest
+        # exactly where the policy is stuck. Linear gives a constant 1/pi. exp(-k*tilt)
+        # gives k*exp(-k*tilt): 1.00 at 0 deg and 0.59 at 30 deg for k=1, against linear's
+        # 0.32, but only 0.21 at 90 deg and 0.04 at 180 deg.
+        #
+        # Two things the search established and this file should not lose:
+        #   - Offline scoring of a shape on FIXED trajectories does not predict what it
+        #     TRAINS. It called linear roughly neutral; linear trained 15.7 pp worse on
+        #     the tail. Shapes are compared by training runs here, not by analysis.
+        #   - Steepening near upright amplifies the morphology asymmetry, because
+        #     reaching upright is exactly what no-tail cannot do. Scored on real
+        #     trajectories the tail:no-tail gain ratio runs 1.82x (cos), 1.90x (linear),
+        #     2.33x (exp k=1), 2.87x (exp k=2). It is the same bias the deleted step
+        #     bonus had, just smoothed.
+        up_f = 1.0 - np.arccos(np.clip(front_up[2], -1.0, 1.0)) / np.pi
+        up_r = 1.0 - np.arccos(np.clip(rear_up[2], -1.0, 1.0)) / np.pi
 
         # Dense, per-step, NO time ramp: every upright step counts, so under the SAC
         # discount (gamma < 1) the optimal policy rights ASAP and holds. The sum term
         # gives each body an independent gradient (no vanishing when the other is
         # inverted); the product term rewards true "both upright" simultaneously.
         r_pos = w_pos * (0.5 * (up_f + up_r) + up_f * up_r)
-
-        # Success bonus: crisp "reach upright and stay" signal once both are upright.
-        r_bonus = w_bonus if (up_f > up_thresh and up_r > up_thresh) else 0.0
 
         # --- penalty magnitudes, unweighted ---
         # Each is the raw physical quantity the matching weight prices. They are
@@ -538,10 +667,9 @@ class CatEnv(MujocoEnv, EzPickle):
         r_en = self.w_en * m_en
         r_av, r_jv, r_time = self.w_av * m_av, self.w_jv * m_jv, self.w_time * m_time
 
-        final_reward = r_pos + r_bonus - r_en - r_av - r_jv - r_time
+        final_reward = r_pos - r_en - r_av - r_jv - r_time
         reward_info = {
             "r_pos": r_pos,
-            "r_bonus": r_bonus,
             "r_en": r_en,
             "r_av": r_av,
             "r_jv": r_jv,
