@@ -42,7 +42,7 @@ bool ENCODER2_REVERSED = true;
 // Front M1 = rot1 (roll): sim (kp=4.0, kd=0.4);  Front M2 = pitch: sim (kp=20.0, kd=1.0).
 // Tuned by tools/tune_pd_gains.py -- see cat_env.py::pd_nominal for the method.
 double Kp1 = 4096.0;
-double Kd1 = 409.6;
+double Kd1 = 1024.0;
 double Kp2 = 20480.0;
 double Kd2 = 1024.0;
 
