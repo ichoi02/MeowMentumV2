@@ -2,185 +2,167 @@
 
 A bio-inspired **self-righting robot** — the "falling cat" reflex. A two-body robot
 (front + rear) joined by an actuated spine, plus a tail, learns in simulation to
-reorient itself during a short free fall (~0.74 s) so it lands upright, then that
-policy is distilled and deployed to real hardware. (CMU 24-775, Bio-inspired Robot Design.)
+reorient itself during a **1.0 s** free fall so it lands upright; that policy is then
+distilled and deployed to real hardware. (CMU 24-775, Bio-inspired Robot Design.)
 
-The maneuver is a **zero-angular-momentum reorientation**: dropped at rest in an
-arbitrary attitude, the robot must bend and counter-twist its spine (and swing the
-tail) to rotate its body halves upright — exactly how a cat rights itself mid-air.
+The maneuver is a **zero-angular-momentum reorientation**: released in an arbitrary
+attitude, the robot bends and counter-twists its spine (and swings the tail) to rotate
+its body halves upright — how a cat rights itself mid-air. The study is a **morphology
+ablation**: `tail` vs `notail`, scored as both-bodies-upright success rate.
 
 ## Pipeline
 
 ```
-  MuJoCo sim (Cat-v0)                     hardware
-  ┌───────────────────┐   distill  ┌──────────────────────────────┐
-  │ SAC teacher       │──DAgger──▶ │ student MLP (partial obs)    │
-  │ (privileged obs)  │            │  → ONNX → Raspberry Pi       │
-  └───────────────────┘            │  → serial → 2× Teensy (PD)   │
-        train.py                   └──────────────────────────────┘
-     cat_env/  model/                 onnx_conversion.py  hardware/
+  MuJoCo sim (Cat-v0 / CatNoTail-v0)          hardware
+  ┌────────────────────────┐  distill  ┌──────────────────────────────┐
+  │ SmoothSAC teacher      │──DAgger─▶ │ student MLP (11-dim obs)     │
+  │ (73-dim privileged obs)│           │  → ONNX → Raspberry Pi 50 Hz │
+  └────────────────────────┘           │  → serial → 2× Teensy (1 kHz)│
+      train.py  cat_env/  model/       └──────────────────────────────┘
+                                        distillation.py  onnx_conversion.py  hardware/
 ```
 
-1. **Train** a privileged SAC *teacher* in sim on the full state (`train.py`).
-2. **Distill** it (DAgger) into a *student* MLP that sees only what the real robot
-   has — the front IMU + joint encoders (`distillation.py`).
-3. **Export** the student to ONNX (`onnx_conversion.py`).
-4. **Deploy**: a Raspberry Pi runs the ONNX policy at 50 Hz, streaming joint targets
-   over serial to two Teensy 4.0 boards that close a 1 kHz PD loop (`hardware/`).
-
-## Repository layout
+## Layout
 
 | Path | Role |
 |---|---|
-| `cat_env/cat_env.py` | Gymnasium env `Cat-v0` (physics, obs, reward, domain randomization) |
-| `cat_env/env_util.py` | PD controller, quaternion / projected-gravity / IMU-align helpers |
-| `model/cat.xml` | MuJoCo model (front/rear bodies, spine joints, tail, actuators) |
-| `train.py` | SAC teacher training + TensorBoard reward logging |
-| `distillation.py` | DAgger distillation of teacher → student (partial obs, frame-stacked) |
-| `test.py` | MuJoCo viewer for the teacher or student policy |
-| `onnx_conversion.py` | Export the student `.pth` → `policies/cat_controller.onnx` (opset 11, single file) |
-| `policies/` | **All trained artifacts**: teacher `.zip`, student `.pth`, exported `.onnx`. Paths come from `variants.py` (`teacher_path` / `student_path` / `onnx_path`), so no script hardcodes a location |
-| `hardware/controller.py` | Raspberry Pi control loop: read IMUs/encoders → ONNX → motor targets |
-| `hardware/PD_control_{front,back}/*.ino` | Teensy 4.0 firmware: 1 kHz PD, BNO08x IMU, serial protocol |
-| `hardware/e2e_test.py` | Hardware-in-the-loop test (ONNX/obs/action parity + closed-loop righting) |
-| `hardware/reconstruct_viz.py` | **[Pi]** telemetry → student obs → kinematics, saved to `.npz` |
-| `hardware/reconstruct_viz_view.py` | **[desktop]** replay the saved `.npz` in the MuJoCo viewer |
-| `hardware/{discover_teensy,flash_pd_control_teensy}.*` | Teensy discovery + build/flash tooling |
-| `hardware/{postmortem,plot_telemetry_motor_angles}.py` | Telemetry plotting |
+| `cat_env/cat_env.py` | Gymnasium env `Cat-v0` — physics, obs, reward, domain randomization |
+| `cat_env/env_util.py` | PD controller (Teensy inner loop, step for step), projected-gravity helpers |
+| `model/cat{,_notail}.xml` | MuJoCo models; the no-tail arm keeps the joint but starves the motor |
+| `train.py` | SAC teacher training (`SmoothSAC`) + TensorBoard reward logging |
+| `smooth_sac.py` | SAC with the action-smoothness term in the **actor loss** |
+| `distillation.py` | DAgger teacher → student (partial obs); defines the student obs layout |
+| `onnx_conversion.py` | Student `.pth` → `policies/cat_controller<suffix>.onnx` (single file, opset 11) |
+| `test.py` | MuJoCo viewer for a teacher or student policy |
+| `policies/` | **All trained artifacts**; paths come from `variants.py`, nothing hardcodes a location |
 | `docs/evaluate.py` | Closed-loop success rate + penalty-magnitude diagnostics (`--stats`) |
-| `docs/sweep.py` | Parallel reward-weight sweep driver (train → evaluate → JSONL) |
-| `docs/REWARD_TUNING.md` | How the five penalty weights were tuned, and the sweep data |
+| `docs/sweep.py`, `docs/sweep_jobs/` | Parallel reward-weight sweep driver → JSONL |
+| `docs/{EVALUATION,REWARD_TUNING}.md` | Ablation results; how the weights were tuned, with the data |
+| `tools/tune_pd_gains.py` | Step-response tuner for the inner-loop PD gains |
+| `plots/plot_joint_tracking.py` | Commanded vs filtered vs achieved joint angles, per drop |
+| `hardware/controller.py` | Pi control loop: IMUs/encoders → ONNX → joint targets → serial |
+| `hardware/PD_control_{front,back}/*.ino` | Teensy 4.0 firmware: 1 kHz PD, BNO08x IMU, serial protocol |
+| `hardware/e2e_test.py` | Hardware-in-the-loop parity test (no physical robot needed) |
+| `hardware/reconstruct_viz{,_view}.py` | **[Pi]** telemetry → pose `.npz`; **[desktop]** replay it in MuJoCo |
+| `hardware/{discover_teensy.py,flash_pd_control_teensy.sh}` | Teensy discovery + build/flash |
+| `experiments/`, `telemetry/` | Logged hardware drops (CSV) and sim2real analysis |
 
-## Simulation — `Cat-v0`
+## Simulation
 
-- **Model** (`model/cat.xml`): `front_body` (free root) → `rot1` (spine roll) → `pitch`
-  (spine) → `rear_body` (`rot2`, roll) → `tail` (pitch). Contact disabled; 1 ms timestep,
-  `frame_skip=20` → 50 Hz control; episode = 37 steps ≈ 0.74 s.
-- **Observation (73-dim, yaw-invariant):** front & rear **projected gravity** (3+3),
-  front & rear **gyro** (3+3), joint angles (4), joint velocities (4), applied torque
-  (4), normalized step (1), plus a **privileged DR block** (48) carrying this episode's
-  actual randomization draw — per-body mass / COM / inertia, per-motor-group damping,
-  armature, friction, torque limit and PD gains, and the action delay, each normalized
-  to ~[−1,1] with nominal at 0. Projected gravity (world −z in body frame) replaces the
-  raw rotation matrix so the policy is invariant to heading. The DR block is
-  teacher-only and sits **last**, so the student slices are unaffected; construct the
-  env with `privileged=False` to get the old 25-dim space back for pre-DR checkpoints.
-- **Action (3-dim, in [−1,1]):** `[roll, pitch, tail]`, mapped to joint targets over
-  `jnt_range`; the rear roll `rot2` is driven as `−roll` (counter-twist). An inner **PD controller**
-  (`env_util.PDController`, per-joint gains) tracks the targets each 1 ms substep — the
-  sim model of the Teensy inner loop.
-- **Reward** (dense, no time ramp — the discount drives "upright as soon as possible"):
-  `r = w_pos·(½(up_f+up_r) + up_f·up_r) + w_bonus·1[both upright] − Σ penalties`,
-  with per-body uprightness `up = ½(cos(tilt)+1)`. Four penalties, all hardware-facing:
+- **Model**: `front_body` (free root) → `rot1` (spine roll) → `pitch` → `rear_body`
+  (`rot2`, roll) → `tail` (pitch). Contact disabled; 1 ms timestep, `frame_skip=20`
+  → 50 Hz control; episode = **50 steps = 1.0 s** (a 4.9 m drop).
+- **Observation (73-dim, yaw-invariant)**: front/rear **projected gravity** (3+3),
+  front/rear gyro (3+3), joint angles (4), joint velocities (4), applied torque (4),
+  normalized step (1), plus a **privileged DR block (48)** carrying this episode's
+  actual randomization draw. The block is teacher-only and sits **last**, so student
+  slices never move; `privileged=False` gives the old 25-dim space back.
+- **Action (3-dim, [−1,1])**: `[roll, pitch, tail]`. Passed through a per-channel
+  first-order low-pass (`filter_alpha = [0.1, 0.3, 0.1]`, sized against measured
+  hardware travel), then mapped to joint targets; `rot2` is driven as `−roll`. An
+  inner PD loop tracks the targets every 1 ms, reproducing the Teensy's encoder
+  quantization, velocity filter, deadband and minimum-PWM floor.
+- **Reward** (dense, per-step, no time ramp — the discount drives "upright ASAP"):
 
-  | term | penalizes | why |
-  |---|---|---|
-  | `w_en·mean(τ²)` | applied torque | energy |
-  | `w_av·mean(ω²)` | body angular velocity | landing upright but still tumbling |
-  | `w_jv·mean(q̇²)` | joint velocity | motion that does not buy reorientation |
-  | `w_time·Σ_{i<j}\|Δaᵢ\|\|Δaⱼ\|` | joints moving *simultaneously* | a step-by-step maneuver stays in states the sim models well |
+  ```
+  r = w_pos·(½(up_f + up_r) + up_f·up_r) − w_en·mean(τ²) − w_av·mean(ω²) − w_jv·mean(q̇²) − w_time·Σ_{i<j}|Δaᵢ||Δaⱼ|
+  ```
 
-  Each `info` dict also reports the **unweighted** magnitude `m_*` beside `r_*` — that,
-  not the weighted term, is what reward tuning reads. See `docs/REWARD_TUNING.md`;
-  weights are overridable as `CAT_W_{EN,AV,JV,TIME}` without a code edit.
-
-  Both variants **share one weight vector** (`cat_env.py::PENALTY_WEIGHTS`) — `en` 0.65,
-  `av` 0.0055, `jv` 0.0008, `time` 0.85 — because this is a *morphology* ablation: if the
-  arms run different rewards, the tail-vs-no-tail gap mixes the tail's contribution with a
-  reward-budget difference. Found by scaling the old per-variant tail vector by a single
-  `k` and scoring no-tail (the binding arm) on fixed releases at roll 180/90/45/0, pitch 0
-  — mean success rose monotonically 47.2% at `k`=0 to 58.6% at `k`=1
-  (`docs/shared_k_runs.jsonl`). Two caveats: the vector costs the trained no-tail policy
-  only **~12% of task reward**, not the ~43% the same numbers cost when they were tuned
-  (moving action rate to the actor loss collapsed the `m_time` baseline 7x, so the old
-  ~18–30% collapse ceiling was never reached anywhere in the sweep); and the mean hides a
-  **monotone regression at roll 180**, 24.0% at `k`=0 down to 16.3% at `k`=1, while roll 90
-  climbs 34.0% → 72.3%. Not yet validated on the tail arm. Historical per-variant tuning,
-  including the budgets those weights came from, is in `docs/REWARD_TUNING.md`.
+  with per-body uprightness **linear** in tilt, `up = 1 − tilt/π`, and `w_pos = 1.5`.
+  There is no success bonus (removed: it was morphology-biased). Penalties price
+  torque, body angular velocity, joint velocity and simultaneous multi-joint motion —
+  all hardware-facing. Both variants **share one weight vector**
+  (`cat_env.py::PENALTY_WEIGHTS`, currently `en 0.03859 / av 0.002123 / jv 0.0003087 /
+  time 0`) because a morphology ablation must not also vary the reward. `w_time` is 0:
+  the action low-pass absorbs raw action rate, so the term priced a quantity the robot
+  does not feel. Each `info` also reports the **unweighted** magnitude `m_*` beside
+  `r_*` — that, not the weighted term, is what tuning reads. Overridable as
+  `CAT_W_{POS,EN,AV,JV,TIME}` without a code edit; see `docs/REWARD_TUNING.md`.
 - **Action smoothness is an actor-loss term, not a reward penalty**
-  (`smooth_sac.py::SmoothSAC`). The old `w_sm·mean(Δa²)` is gone; the actor now
-  minimizes `smooth_coef·‖π_μ(s_{t+1}) − π_μ(s_t)‖²` over consecutive replay states,
-  where `π_μ = tanh(μ)` is the **deterministic mean** — what `deterministic=True`, the
-  ONNX export and the Teensy actually command — rather than a sample carrying SAC's
-  exploration noise. Penalizing the sample would price jitter the deployed policy does
-  not have and would let the actor satisfy the term by shrinking `log_std`, fighting the
-  `ent_coef` auto-tuner. As a reward it also had to be routed through the critic and
-  traded against task reward inside the same scalar `Q`, which is what made `w_sm` a
-  collapse risk; here the gradient reaches the actor directly. Logged as
-  `train/smooth_loss` at any coefficient (including 0), same convention as `m_*`.
-- **Domain randomization** (per reset): mass, COM, inertia, action delay, initial joint
-  angles (±0.2 rad), and a uniformly random initial attitude (`init_ang_vel_max` sets an
-  optional initial tumble). Damping, armature, friction, `ctrlrange` and the PD gains are
-  drawn **once per motor group** — `rot1`/`rot2` are the same 9.68:1 roll motor and
-  `pitch`/`tail` the same 34.014:1 motor, so identical hardware gets identical
-  multipliers rather than independent draws the real robot could never exhibit.
+  (`smooth_sac.py`): the actor minimizes `smooth_coef·‖π_μ(s_{t+1}) − π_μ(s_t)‖²` over
+  the **deterministic mean** action — what `deterministic=True`, the ONNX export and
+  the Teensy actually command. As a reward it traded against task reward inside the
+  same scalar `Q` and made passivity look optimal; here the gradient reaches the actor
+  directly. Logged as `train/smooth_loss` at any coefficient, including 0.
+- **Release distribution**: full roll (±180°), pitch ±45°, yaw fixed at 0 (everything
+  is yaw-invariant), initial tumble ±0.5 rad/s per axis, initial joint angles ±0.2 rad.
+- **Domain randomization** (per reset): body mass, COM, inertia; action delay 0–2 steps;
+  and per **motor group** — damping, armature, friction, `ctrlrange` and PD gains.
+  `rot1`/`rot2` are the same 9.68:1 motor and `pitch`/`tail` the same 34.014:1, so
+  identical hardware draws identical multipliers rather than a robot that cannot exist.
 
 ## Training & distillation
 
-- **Teacher** (`train.py`): `SmoothSAC` (SAC + the actor smoothness term above),
-  `MlpPolicy` `[256,256]`, 10 parallel envs, ~1M steps. `--smooth-coef` sets the
-  coefficient (default 10.0, sized so the term carries the pressure the old `w_sm` did
-  — derivation in `smooth_sac.py`; `0` gives plain SAC). Checkpoints stay loadable by
-  plain `SAC.load`, since only the training objective changes, not the policy. Saves
-  `policies/cat_controller_<timestamp>.zip` (rename/stage as
-  `policies/cat_controller.zip`, which is what every script loads by default).
-- **Student** (`distillation.py`): DAgger. The student sees only the real robot's
-  sensors — **front projected gravity (3) + 4 joint angles**, **stacked over 2 timesteps
-  (14-dim, `distillation.N_FRAMES`)** so it can infer the velocities the privileged
-  teacher used; `--frames` changes it and tags the filename. Trained with
-  observation noise + random delay for robustness. Saves
-  `policies/student_policy_<timestamp>.pth` (stage as `policies/student_policy.pth`).
+- **Teacher** (`train.py`): `SmoothSAC`, `MlpPolicy [256,256]`, 10 parallel envs, ~1M
+  steps. `--smooth-coef` sets the smoothness weight (default 2.0; `0` = plain SAC).
+  Checkpoints stay loadable by plain `SAC.load` — only the objective changes. Saves
+  `policies/cat_controller<suffix><tag>_<timestamp>.zip`; stage it as
+  `policies/cat_controller<suffix>.zip`, which is what every script loads by default.
+- **Student** (`distillation.py`): DAgger, 50 iterations × 2000 steps. Sees only what
+  the robot has — **11 dims**: front projected gravity (3), joint angles (4), the
+  **previous action** (3) and episode progress (1). The previous action is required,
+  not decorative: the action low-pass is persistent state, so without command history
+  the student's problem is not Markov. Trained with per-episode sensor bias, per-frame
+  noise and random observation delay. `--smooth-coef` adds the student-side smoothness
+  term (default 0). Saves `policies/student_policy<suffix>_<timestamp>.pth`.
+- **No-tail arm**: `cat_notail.xml` keeps the tail joint but caps its motor at ±1e-6
+  torque, so `action[2]` gets no gradient. The tail joint reading **and** the tail
+  action are forced to 0 in the sim frame, in `docs/evaluate.py` and in
+  `hardware/controller.py` alike — pinning only one side would leave the two apart.
 
 ## Hardware
 
-- **Boards:** two Teensy 4.0, each with a BNO08x IMU and two geared DC motors + encoders,
-  running a 1 kHz PD loop. Front board → `rot1` (roll) + `pitch`; back board → `tail` +
-  `rot2` (roll). Serial protocol: host sends `m1,m2` targets; boards stream
-  `qr,qi,qj,qk,angle1,angle2,acc` at 50 Hz. Gear ratios: roll **9.68:1**, pitch/tail
-  **34.014:1**. Teensy PD gains = sim gains × 1024 (normalized torque → PWM).
-- **Pi loop** (`hardware/controller.py`): 50 Hz. Reads both IMUs/encoders → builds the
-  14-dim student obs (front projected gravity + joints, 2-frame stack) → ONNX inference →
-  joint-target mapping → serial. The policy output is commanded as-is: there is no action
-  filter, so smoothness comes from the actor-loss term rather than the control path, and
-  `e2e_test.py` checks the mapping against the sim's executed target. Detects free-fall
-  (`acc < 3.5`), then drives for `CONTROL_DURATION = 0.74 s` and logs telemetry CSV.
-
-## Validation tools
-
-- `hardware/e2e_test.py` — drives MuJoCo as the "physical robot" through the **real**
-  controller code + ONNX, checking dimension/ONNX/obs/action parity and closed-loop
-  righting (seed-matched, the hardware path reproduces the student exactly).
-- `hardware/reconstruct_viz.py` (**Pi**, MuJoCo-free) + `reconstruct_viz_view.py`
-  (**desktop**) — reconstruct the robot pose from the telemetry the policy actually
-  consumes and replay it in the viewer. The key signal is the **rear-IMU cross-check**
-  (rear pose implied by front IMU + joints vs the independent rear IMU): ~0° = consistent;
-  several degrees on hardware = a gear-ratio / IMU-alignment / spine-flex mismatch to fix
-  before dropping. `--source {sim,sweep,serial}`, `--selftest` for headless validation.
+- **Boards**: two Teensy 4.0, each with a BNO08x IMU and two geared DC motors +
+  encoders, running a 1 kHz PD loop. Front → `rot1` + `pitch`; back → `tail` + `rot2`.
+  Serial: host sends `m1,m2` targets (4 dp, rad); boards stream
+  `qr,qi,qj,qk,angle1,angle2,acc` at 50 Hz. Teensy PD gains = sim gains × 1024.
+- **Pi loop** (`hardware/controller.py`): 50 Hz. Both IMUs/encoders → 11-dim student
+  obs → ONNX → per-channel low-pass → joint targets → serial. The filter, the mapping
+  and the previous-action bookkeeping mirror `cat_env.step` exactly, in the same order.
+  Detects free fall (`acc < 3.5`), drives for `CONTROL_DURATION = 1.0 s`, logs CSV.
+- **Validation**: `hardware/e2e_test.py` drives MuJoCo as the "physical robot" through
+  the real controller code + ONNX (dimension/ONNX/obs/action parity, then closed-loop
+  righting). `reconstruct_viz.py` rebuilds the pose from the telemetry the policy
+  actually consumes; its key signal is the **rear-IMU cross-check** — rear pose implied
+  by front IMU + joints vs the independent rear IMU. ~0° = consistent; several degrees
+  on hardware = a gear-ratio / IMU-alignment / spine-flex mismatch to fix before a drop.
 
 ## Quickstart
 
 ```bash
-pip install -r requirements.txt          # sim/training deps
+pip install -r requirements.txt
 
-# --- simulation ---
-python train.py                          # SAC teacher  -> policies/cat_controller_*.zip
-python test.py                           # view teacher/student in MuJoCo
-python distillation.py                   # DAgger        -> policies/student_policy_*.pth
-python onnx_conversion.py                # student .pth  -> policies/cat_controller.onnx
+# --- simulation ---  (add --variant notail for the ablation arm)
+python train.py                          # SAC teacher  -> policies/cat_controller*.zip
+python distillation.py                   # DAgger       -> policies/student_policy*.pth
+python onnx_conversion.py                # student .pth -> policies/cat_controller*.onnx
+python test.py --agent student --roll 180        # watch one policy in MuJoCo
+
+# --- evaluation ---
+python docs/evaluate.py --agent teacher --episodes 300 --stats
+python docs/evaluate.py --roll 180 --episodes 300     # fixed release attitude
+python plots/plot_joint_tracking.py --agent student --deg
 
 # --- validation ---
-python hardware/e2e_test.py                              # full pipeline parity + righting
+python hardware/e2e_test.py
 python hardware/reconstruct_viz.py --selftest --source sweep
 
 # --- hardware (Raspberry Pi + desktop) ---
 bash hardware/flash_pd_control_teensy.sh                 # build + flash both Teensys
-python hardware/controller.py                            # Pi: run the policy on the robot
-python hardware/reconstruct_viz.py --source serial --out recon.npz --duration 10   # Pi: record
-python hardware/reconstruct_viz_view.py recon.npz        # desktop: replay in MuJoCo
+python hardware/controller.py --variant tail             # Pi: fly the policy
+python hardware/reconstruct_viz.py --source serial --out recon.npz --duration 10
+python hardware/reconstruct_viz_view.py recon.npz        # desktop: replay
 ```
 
-## notes
+## Notes
 
-- **`env_util.reverse_align_imu_quaternions` is not the true inverse** of
-  `controller.py::align_imu_quaternions` (one-sided vs two-sided transform); the
-  reconstruction tools define the correct inverse locally.
+- Success is scored as **both bodies within 30° of upright** at the end of the drop
+  (`docs/evaluate.py::UPRIGHT_DEG`).
+- `build_student_obs` is duplicated in `distillation.py` and `hardware/controller.py`
+  by design (the Pi must not import torch/MuJoCo). They **must** stay identical;
+  `e2e_test.py` is what catches a drift.
+- `env_util.reverse_align_imu_quaternions` is **not** the true inverse of
+  `controller.py::align_imu_quaternions` (one-sided vs two-sided); the reconstruction
+  tools define the correct inverse locally.
+- `visualize.py` (repo root) is a legacy telemetry replay with a hardcoded absolute
+  path to an older checkout — use `hardware/reconstruct_viz{,_view}.py` instead.
