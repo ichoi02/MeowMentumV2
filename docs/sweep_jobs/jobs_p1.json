@@ -1,0 +1,80 @@
+[
+ {
+  "name": "base_tail_s0",
+  "variant": "tail",
+  "weights": {
+   "sm": 0,
+   "en": 0,
+   "av": 0,
+   "jv": 0,
+   "time": 0,
+   "notail_scale": 1.0
+  },
+  "seed": 0
+ },
+ {
+  "name": "base_tail_s1",
+  "variant": "tail",
+  "weights": {
+   "sm": 0,
+   "en": 0,
+   "av": 0,
+   "jv": 0,
+   "time": 0,
+   "notail_scale": 1.0
+  },
+  "seed": 1
+ },
+ {
+  "name": "base_tail_s2",
+  "variant": "tail",
+  "weights": {
+   "sm": 0,
+   "en": 0,
+   "av": 0,
+   "jv": 0,
+   "time": 0,
+   "notail_scale": 1.0
+  },
+  "seed": 2
+ },
+ {
+  "name": "base_notail_s0",
+  "variant": "notail",
+  "weights": {
+   "sm": 0,
+   "en": 0,
+   "av": 0,
+   "jv": 0,
+   "time": 0,
+   "notail_scale": 1.0
+  },
+  "seed": 0
+ },
+ {
+  "name": "base_notail_s1",
+  "variant": "notail",
+  "weights": {
+   "sm": 0,
+   "en": 0,
+   "av": 0,
+   "jv": 0,
+   "time": 0,
+   "notail_scale": 1.0
+  },
+  "seed": 1
+ },
+ {
+  "name": "base_notail_s2",
+  "variant": "notail",
+  "weights": {
+   "sm": 0,
+   "en": 0,
+   "av": 0,
+   "jv": 0,
+   "time": 0,
+   "notail_scale": 1.0
+  },
+  "seed": 2
+ }
+]

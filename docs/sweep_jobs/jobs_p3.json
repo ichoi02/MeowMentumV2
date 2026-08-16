@@ -1,0 +1,249 @@
+[
+ {
+  "name": "t_mild",
+  "variant": "tail",
+  "weights": {
+   "sm": 0.399,
+   "en": 0.215,
+   "av": 0.0,
+   "jv": 0.000815,
+   "time": 0.283,
+   "notail_scale": 1.0
+  },
+  "seed": 0,
+  "term": "combo",
+  "budget": 0.24,
+  "fracs": {
+   "sm": 0.06,
+   "en": 0.06,
+   "jv": 0.06,
+   "time": 0.06
+  }
+ },
+ {
+  "name": "t_lean",
+  "variant": "tail",
+  "weights": {
+   "sm": 1.2,
+   "en": 0.0,
+   "av": 0.0,
+   "jv": 0.0,
+   "time": 0.848,
+   "notail_scale": 1.0
+  },
+  "seed": 0,
+  "term": "combo",
+  "budget": 0.36,
+  "fracs": {
+   "sm": 0.18,
+   "time": 0.18
+  }
+ },
+ {
+  "name": "t_cool",
+  "variant": "tail",
+  "weights": {
+   "sm": 0.399,
+   "en": 0.646,
+   "av": 0.00547,
+   "jv": 0.000815,
+   "time": 0.848,
+   "notail_scale": 1.0
+  },
+  "seed": 0,
+  "term": "combo",
+  "budget": 0.54,
+  "fracs": {
+   "sm": 0.06,
+   "en": 0.18,
+   "av": 0.06,
+   "jv": 0.06,
+   "time": 0.18
+  }
+ },
+ {
+  "name": "t_noav",
+  "variant": "tail",
+  "weights": {
+   "sm": 1.2,
+   "en": 0.646,
+   "av": 0.0,
+   "jv": 0.000815,
+   "time": 0.848,
+   "notail_scale": 1.0
+  },
+  "seed": 0,
+  "term": "combo",
+  "budget": 0.6,
+  "fracs": {
+   "sm": 0.18,
+   "en": 0.18,
+   "jv": 0.06,
+   "time": 0.18
+  }
+ },
+ {
+  "name": "t_bal",
+  "variant": "tail",
+  "weights": {
+   "sm": 1.2,
+   "en": 0.646,
+   "av": 0.0,
+   "jv": 0.00244,
+   "time": 0.848,
+   "notail_scale": 1.0
+  },
+  "seed": 0,
+  "term": "combo",
+  "budget": 0.72,
+  "fracs": {
+   "sm": 0.18,
+   "en": 0.18,
+   "jv": 0.18,
+   "time": 0.18
+  }
+ },
+ {
+  "name": "t_enhot",
+  "variant": "tail",
+  "weights": {
+   "sm": 1.2,
+   "en": 1.8,
+   "av": 0.0,
+   "jv": 0.0,
+   "time": 0.848,
+   "notail_scale": 1.0
+  },
+  "seed": 0,
+  "term": "combo",
+  "budget": 0.86,
+  "fracs": {
+   "sm": 0.18,
+   "en": 0.5,
+   "time": 0.18
+  }
+ },
+ {
+  "name": "n_micro",
+  "variant": "notail",
+  "weights": {
+   "sm": 0.137,
+   "en": 0.149,
+   "av": 0.0,
+   "jv": 0.000211,
+   "time": 0.0903,
+   "notail_scale": 1.0
+  },
+  "seed": 0,
+  "term": "combo",
+  "budget": 0.08,
+  "fracs": {
+   "sm": 0.02,
+   "en": 0.02,
+   "jv": 0.02,
+   "time": 0.02
+  }
+ },
+ {
+  "name": "n_lean",
+  "variant": "notail",
+  "weights": {
+   "sm": 0.412,
+   "en": 0.0,
+   "av": 0.0,
+   "jv": 0.0,
+   "time": 0.271,
+   "notail_scale": 1.0
+  },
+  "seed": 0,
+  "term": "combo",
+  "budget": 0.12,
+  "fracs": {
+   "sm": 0.06,
+   "time": 0.06
+  }
+ },
+ {
+  "name": "n_mild",
+  "variant": "notail",
+  "weights": {
+   "sm": 0.412,
+   "en": 0.447,
+   "av": 0.0,
+   "jv": 0.000633,
+   "time": 0.271,
+   "notail_scale": 1.0
+  },
+  "seed": 0,
+  "term": "combo",
+  "budget": 0.24,
+  "fracs": {
+   "sm": 0.06,
+   "en": 0.06,
+   "jv": 0.06,
+   "time": 0.06
+  }
+ },
+ {
+  "name": "n_lean18",
+  "variant": "notail",
+  "weights": {
+   "sm": 1.24,
+   "en": 0.0,
+   "av": 0.0,
+   "jv": 0.0,
+   "time": 0.813,
+   "notail_scale": 1.0
+  },
+  "seed": 0,
+  "term": "combo",
+  "budget": 0.36,
+  "fracs": {
+   "sm": 0.18,
+   "time": 0.18
+  }
+ },
+ {
+  "name": "n_jvmix",
+  "variant": "notail",
+  "weights": {
+   "sm": 0.412,
+   "en": 0.447,
+   "av": 0.0,
+   "jv": 0.0019,
+   "time": 0.271,
+   "notail_scale": 1.0
+  },
+  "seed": 0,
+  "term": "combo",
+  "budget": 0.36,
+  "fracs": {
+   "sm": 0.06,
+   "en": 0.06,
+   "jv": 0.18,
+   "time": 0.06
+  }
+ },
+ {
+  "name": "n_cool",
+  "variant": "notail",
+  "weights": {
+   "sm": 0.412,
+   "en": 1.34,
+   "av": 0.00403,
+   "jv": 0.000633,
+   "time": 0.813,
+   "notail_scale": 1.0
+  },
+  "seed": 0,
+  "term": "combo",
+  "budget": 0.54,
+  "fracs": {
+   "sm": 0.06,
+   "en": 0.18,
+   "av": 0.06,
+   "jv": 0.06,
+   "time": 0.18
+  }
+ }
+]

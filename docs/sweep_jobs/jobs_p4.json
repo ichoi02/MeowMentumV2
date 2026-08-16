@@ -1,0 +1,164 @@
+[
+ {
+  "name": "t_cool_s1",
+  "variant": "tail",
+  "weights": {
+   "sm": 0.399,
+   "en": 0.646,
+   "av": 0.00547,
+   "jv": 0.000815,
+   "time": 0.848,
+   "notail_scale": 1.0
+  },
+  "seed": 1,
+  "term": "combo",
+  "budget": 0.54,
+  "fracs": {
+   "sm": 0.06,
+   "en": 0.18,
+   "av": 0.06,
+   "jv": 0.06,
+   "time": 0.18
+  }
+ },
+ {
+  "name": "t_cool_s2",
+  "variant": "tail",
+  "weights": {
+   "sm": 0.399,
+   "en": 0.646,
+   "av": 0.00547,
+   "jv": 0.000815,
+   "time": 0.848,
+   "notail_scale": 1.0
+  },
+  "seed": 2,
+  "term": "combo",
+  "budget": 0.54,
+  "fracs": {
+   "sm": 0.06,
+   "en": 0.18,
+   "av": 0.06,
+   "jv": 0.06,
+   "time": 0.18
+  }
+ },
+ {
+  "name": "t_lean_s1",
+  "variant": "tail",
+  "weights": {
+   "sm": 1.2,
+   "en": 0.0,
+   "av": 0.0,
+   "jv": 0.0,
+   "time": 0.848,
+   "notail_scale": 1.0
+  },
+  "seed": 1,
+  "term": "combo",
+  "budget": 0.36,
+  "fracs": {
+   "sm": 0.18,
+   "time": 0.18
+  }
+ },
+ {
+  "name": "t_lean_s2",
+  "variant": "tail",
+  "weights": {
+   "sm": 1.2,
+   "en": 0.0,
+   "av": 0.0,
+   "jv": 0.0,
+   "time": 0.848,
+   "notail_scale": 1.0
+  },
+  "seed": 2,
+  "term": "combo",
+  "budget": 0.36,
+  "fracs": {
+   "sm": 0.18,
+   "time": 0.18
+  }
+ },
+ {
+  "name": "n_mild_s1",
+  "variant": "notail",
+  "weights": {
+   "sm": 0.412,
+   "en": 0.447,
+   "av": 0.0,
+   "jv": 0.000633,
+   "time": 0.271,
+   "notail_scale": 1.0
+  },
+  "seed": 1,
+  "term": "combo",
+  "budget": 0.24,
+  "fracs": {
+   "sm": 0.06,
+   "en": 0.06,
+   "jv": 0.06,
+   "time": 0.06
+  }
+ },
+ {
+  "name": "n_mild_s2",
+  "variant": "notail",
+  "weights": {
+   "sm": 0.412,
+   "en": 0.447,
+   "av": 0.0,
+   "jv": 0.000633,
+   "time": 0.271,
+   "notail_scale": 1.0
+  },
+  "seed": 2,
+  "term": "combo",
+  "budget": 0.24,
+  "fracs": {
+   "sm": 0.06,
+   "en": 0.06,
+   "jv": 0.06,
+   "time": 0.06
+  }
+ },
+ {
+  "name": "n_lean_s1",
+  "variant": "notail",
+  "weights": {
+   "sm": 0.412,
+   "en": 0.0,
+   "av": 0.0,
+   "jv": 0.0,
+   "time": 0.271,
+   "notail_scale": 1.0
+  },
+  "seed": 1,
+  "term": "combo",
+  "budget": 0.12,
+  "fracs": {
+   "sm": 0.06,
+   "time": 0.06
+  }
+ },
+ {
+  "name": "n_lean_s2",
+  "variant": "notail",
+  "weights": {
+   "sm": 0.412,
+   "en": 0.0,
+   "av": 0.0,
+   "jv": 0.0,
+   "time": 0.271,
+   "notail_scale": 1.0
+  },
+  "seed": 2,
+  "term": "combo",
+  "budget": 0.12,
+  "fracs": {
+   "sm": 0.06,
+   "time": 0.06
+  }
+ }
+]
