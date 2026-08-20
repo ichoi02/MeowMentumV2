@@ -1,0 +1,2 @@
+analysis,label,conditions,n,estimate,se_hc3,ci_low,ci_high,t_hc3,p_hc3,residual_sd,df_resid,estimate_no_date,p_no_date,overlap_estimate,p_permutation,n_overlap,p_holm_three_requested
+pitch_leveling_at_roll_180,"Final absolute whole-cat pitch; roll 180, pitch 0/15/30/45 deg","r180,r180_p15,r180_p30,r180_p45",48,0.8229629778972707,4.5752201086830295,-8.431293193105493,10.077219148900035,0.17987396416959694,0.8581828742134239,9.913451513301482,39,2.611958669128381,0.416318479209587,0.5209777881644562,0.9152169566086783,18,0.8581828742134239
